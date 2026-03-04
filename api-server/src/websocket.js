@@ -518,6 +518,45 @@ class WebSocketManager {
       assigned_at: new Date().toISOString()
     }, { userId: agentId });
   }
+
+  // ============================================================================
+  // NOTIFICATION METHODS
+  // ============================================================================
+
+  emitUserNotification(userId, notification) {
+    // Find all connections for this user
+    for (const [connection, client] of this.clients) {
+      if (client.userId === userId && connection.readyState === 1) {
+        connection.send(JSON.stringify({
+          event: 'notification:new',
+          data: { notification }
+        }));
+      }
+    }
+  }
+
+  emitAgentNotification(agentId, notification) {
+    // Agents use the same client map with their ID
+    for (const [connection, client] of this.clients) {
+      if (client.userId === agentId && connection.readyState === 1) {
+        connection.send(JSON.stringify({
+          event: 'notification:new',
+          data: { notification }
+        }));
+      }
+    }
+  }
+
+  isUserInChannel(userId, channelId) {
+    for (const [connection, client] of this.clients) {
+      if (client.userId === userId && client.channels.has(channelId)) {
+        return true;
+      }
+    }
+    return false;
+  }
 }
+
+
 
 module.exports = new WebSocketManager();

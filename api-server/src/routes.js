@@ -3,6 +3,25 @@
  * Projects, Tasks, Costs, Chat, Auth
  */
 
+const {
+  notifyTaskAssigned,
+  notifyTaskAccepted,
+  notifyTaskRejected,
+  notifyTaskCompleted,
+  notifyAgentProjectAssigned,
+  notifyAgentProjectRemoved,
+  notifyAgentRoleUpdated,
+  notifyAgentApproved,
+  getUserNotifications,
+  getAgentNotifications,
+  markUserNotificationRead,
+  markAgentNotificationRead,
+  markAllUserNotificationsRead,
+  markAllAgentNotificationsRead,
+  getUserUnreadCount,
+  getAgentUnreadCount
+} = require('./notifications');
+
 const { getDb, generateId } = require('./database');
 const wsManager = require('./websocket');
 const {
@@ -1717,7 +1736,7 @@ async function sendChannelMessageRoute(request, reply) {
   return { message };
 }
 
-// POST /api/dm/:userId - Create/get DM channel with user
+// POST /api/channels/dm/:userId - Create/get DM channel with user
 async function createOrGetDmRoute(request, reply) {
   const db = getDb();
   const currentUserId = request.user?.id;
@@ -1733,11 +1752,12 @@ async function createOrGetDmRoute(request, reply) {
   let dmChannel;
 
   if (agent_id) {
-    // DM between user and agent
+    // DM between user and agent - join manager_agents for agent info
     dmChannel = db.prepare(`
-      SELECT c.*, a.name as dm_agent_name, a.avatar_url as dm_agent_avatar, a.role as dm_agent_role
+      SELECT c.*, ma.name as dm_agent_name, ma.avatar_url as dm_agent_avatar, 
+             ma.role as dm_agent_role, ma.status as dm_agent_status
       FROM channels c
-      JOIN agents a ON c.dm_agent_id = a.id
+      LEFT JOIN manager_agents ma ON c.dm_agent_id = ma.id
       WHERE c.is_dm = 1 AND c.dm_user_id = ? AND c.dm_agent_id = ?
     `).get(currentUserId, agent_id);
   } else {
@@ -1746,7 +1766,7 @@ async function createOrGetDmRoute(request, reply) {
       SELECT c.*, u.name as dm_user_name, u.avatar_url as dm_user_avatar
       FROM channels c
       JOIN users u ON c.dm_user_id = u.id
-      WHERE c.is_dm = 1 
+      WHERE c.is_dm = 1
       AND ((c.created_by = ? AND c.dm_user_id = ?) OR (c.created_by = ? AND c.dm_user_id = ?))
     `).get(currentUserId, userId, userId, currentUserId);
   }
@@ -1765,38 +1785,43 @@ async function createOrGetDmRoute(request, reply) {
   const id = generateId();
   const now = new Date().toISOString();
 
-  let dmName, otherPartyName;
-
+  let dmName;
   if (agent_id) {
-    const agent = db.prepare('SELECT name FROM manager_agents WHERE id = ?').get(agent_id) || db.prepare('SELECT name FROM agents WHERE id = ?').get(agent_id, agent_id);
-    otherPartyName = agent?.name || 'Agent';
-    dmName = `@${otherPartyName}`;
+    const agent = db.prepare('SELECT name FROM manager_agents WHERE id = ?').get(agent_id);
+    dmName = `@${agent?.name || 'Agent'}`;
   } else {
     const user = db.prepare('SELECT name FROM users WHERE id = ?').get(userId);
-    otherPartyName = user?.name || 'User';
-    dmName = `@${otherPartyName}`;
+    dmName = `@${user?.name || 'User'}`;
   }
 
-  // Disable FK checks so manager_agent IDs can be stored in dm_agent_id
-  db.pragma('foreign_keys = OFF');
+  // Insert WITHOUT pragma - FK constraint was removed in migration
+  db.prepare(`
+    INSERT INTO channels (id, name, type, is_dm, dm_user_id, dm_agent_id, created_by, created_at)
+    VALUES (?, ?, 'dm', 1, ?, ?, ?, ?)
+  `).run(id, dmName, agent_id ? null : userId, agent_id || null, currentUserId, now);
+
+  // Add creator as member
   try {
     db.prepare(`
-      INSERT INTO channels (id, name, type, is_dm, dm_user_id, dm_agent_id, created_by, created_at)
-      VALUES (?, ?, 'dm', 1, ?, ?, ?, ?)
-    `).run(id, dmName, agent_id ? null : userId, agent_id || null, currentUserId, now);
-  } finally {
-    db.pragma('foreign_keys = ON');
-  }
+      INSERT OR IGNORE INTO channel_members (id, channel_id, user_id, joined_at) 
+      VALUES (?, ?, ?, ?)
+    `).run(generateId(), id, currentUserId, now);
+  } catch (e) { }
 
-  // Add members
-  try { db.prepare(`INSERT OR IGNORE INTO channel_members (id, channel_id, user_id, joined_at) VALUES (?, ?, ?, ?)`).run(generateId(), id, currentUserId, now); } catch (e) { }
+  // Add other user as member (if not agent)
   if (!agent_id) {
-    try { db.prepare(`INSERT OR IGNORE INTO channel_members (id, channel_id, user_id, joined_at) VALUES (?, ?, ?, ?)`).run(generateId(), id, userId, now); } catch (e) { }
+    try {
+      db.prepare(`
+        INSERT OR IGNORE INTO channel_members (id, channel_id, user_id, joined_at) 
+        VALUES (?, ?, ?, ?)
+      `).run(generateId(), id, userId, now);
+    } catch (e) { }
   }
 
-  // Return created channel - join manager_agents for agent info
+  // Return created channel with agent info
   const newChannel = db.prepare(`
-    SELECT c.*, ma.name as dm_agent_name, ma.avatar_url as dm_agent_avatar, ma.role as dm_agent_role, ma.status as dm_agent_status
+    SELECT c.*, ma.name as dm_agent_name, ma.avatar_url as dm_agent_avatar, 
+           ma.role as dm_agent_role, ma.status as dm_agent_status
     FROM channels c
     LEFT JOIN manager_agents ma ON c.dm_agent_id = ma.id
     WHERE c.id = ?
@@ -2886,27 +2911,12 @@ async function updateAgentProjectRoleRoute(request, reply) {
     updated_at: now
   });
 
-  // Send DM notification
   try {
-    const { getOrCreateDMChannel, sendChannelMessage } = require('./chat');
-    const dmChannel = await getOrCreateDMChannel(user.id, agentId);
-    await sendChannelMessage(user.id, dmChannel.id,
-      `🔄 ROLE UPDATE\n\n` +
-      `Project: ${project?.name || 'Unknown'}\n` +
-      `New Role: ${role}\n` +
-      `Updated by: ${user.name || user.id}`
-    );
-  } catch (dmErr) {
-    console.error('Error sending role update DM:', dmErr);
+    const { notifyAgentProjectRemoved } = require('./notifications');
+    await notifyAgentProjectRemoved(agentId, project, user.id);
+  } catch (err) {
+    console.error('Error sending removal notification:', err);
   }
-
-  return {
-    success: true,
-    agent_id: agentId,
-    project_id: id,
-    role,
-    updated_at: now
-  };
 }
 
 // ============================================================================
@@ -3087,6 +3097,13 @@ async function approveManagerAgentRoute(request, reply) {
     SET is_approved = TRUE, approved_by = ?, approved_at = ?, status = 'online', updated_at = ?
     WHERE id = ?
   `).run(user.id, now, now, id);
+
+  try {
+    const { notifyAgentApproved } = require('./notifications');
+    await notifyAgentApproved(id, user.id);
+  } catch (err) {
+    console.error('Error sending approval notification:', err);
+  }
 
   // Auto-create DM channel between agent and admin (Scorpion)
   try {
@@ -3991,5 +4008,101 @@ async function unlinkMachineAgentRoute(request, reply) {
   } catch (err) { reply.code(500); return { error: err.message }; }
 }
 
+// ============================================================================
+// NOTIFICATION ROUTES
+// ============================================================================
+
+// GET /api/notifications - Get current user's notifications
+async function getNotificationsRoute(request, reply) {
+  const userId = request.user?.id;
+  if (!userId) {
+    reply.code(401);
+    return { error: 'Authentication required' };
+  }
+
+  const { unread_only, limit } = request.query;
+  try {
+    const notifications = await getUserNotifications(userId, {
+      unreadOnly: unread_only === 'true',
+      limit: parseInt(limit) || 20
+    });
+    const unreadCount = await getUserUnreadCount(userId);
+    return {
+      notifications,
+      unread_count: unreadCount
+    };
+  } catch (err) {
+    reply.code(500);
+    return { error: err.message };
+  }
+}
+
+// POST /api/notifications/:id/read - Mark notification as read
+async function markNotificationReadRoute(request, reply) {
+  const userId = request.user?.id;
+  const { id } = request.params;
+  if (!userId) {
+    reply.code(401);
+    return { error: 'Authentication required' };
+  }
+
+  try {
+    const result = await markUserNotificationRead(id, userId);
+    return result;
+  } catch (err) {
+    reply.code(500);
+    return { error: err.message };
+  }
+}
+
+// POST /api/notifications/read-all - Mark all as read
+async function markAllNotificationsReadRoute(request, reply) {
+  const userId = request.user?.id;
+  if (!userId) {
+    reply.code(401);
+    return { error: 'Authentication required' };
+  }
+
+  try {
+    const result = await markAllUserNotificationsRead(userId);
+    return result;
+  } catch (err) {
+    reply.code(500);
+    return { error: err.message };
+  }
+}
+
+// GET /api/agents/:id/notifications - Get agent notifications
+async function getAgentNotificationsRoute(request, reply) {
+  const { id } = request.params;
+  const user = request.user;
+
+  // Only admins or the agent itself
+  const isAdmin = user?.role === 'admin';
+  const isSelf = user?.id === id;
+
+  if (!isAdmin && !isSelf) {
+    reply.code(403);
+    return { error: 'Not authorized' };
+  }
+
+  try {
+    const notifications = await getAgentNotifications(id);
+    const unreadCount = await getAgentUnreadCount(id);
+    return {
+      notifications,
+      unread_count: unreadCount
+    };
+  } catch (err) {
+    reply.code(500);
+    return { error: err.message };
+  }
+}
+
 module.exports.linkMachineAgentRoute = linkMachineAgentRoute;
 module.exports.unlinkMachineAgentRoute = unlinkMachineAgentRoute;
+// Notifications
+getNotificationsRoute,
+  markNotificationReadRoute,
+  markAllNotificationsReadRoute,
+  getAgentNotificationsRoute

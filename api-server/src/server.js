@@ -721,6 +721,14 @@ process.on('unhandledRejection', (reason, promise) => {
   gracefulShutdown('unhandledRejection');
 });
 
+// ============================================================================
+// NOTIFICATION ROUTES
+// ============================================================================
+fastify.get('/api/notifications', { preHandler: authMiddleware }, routes.getNotificationsRoute);
+fastify.post('/api/notifications/:id/read', { preHandler: authMiddleware }, routes.markNotificationReadRoute);
+fastify.post('/api/notifications/read-all', { preHandler: authMiddleware }, routes.markAllNotificationsReadRoute);
+fastify.get('/api/agents/:id/notifications', { preHandler: authMiddleware }, routes.getAgentNotificationsRoute);
+
 start();
 
 module.exports = { buildServer };

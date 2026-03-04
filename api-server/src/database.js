@@ -530,6 +530,27 @@ class SQLiteAdapter {
       );
     `);
 
+    // User notifications table
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS notifications (
+        id TEXT PRIMARY KEY DEFAULT (lower(hex(randomblob(16)))),
+        user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        type TEXT NOT NULL,
+        title TEXT NOT NULL,
+        content TEXT,
+        is_read BOOLEAN DEFAULT FALSE,
+        data TEXT DEFAULT '{}',
+        created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+        read_at TEXT
+      );
+    `);
+
+    this.db.exec(`
+      CREATE INDEX IF NOT EXISTS idx_notifications_user ON notifications(user_id);
+      CREATE INDEX IF NOT EXISTS idx_notifications_read ON notifications(is_read);
+      CREATE INDEX IF NOT EXISTS idx_notifications_created ON notifications(created_at);
+    `);
+
     this.db.exec(`
       CREATE INDEX IF NOT EXISTS idx_agent_notifications_agent ON agent_notifications(agent_id);
       CREATE INDEX IF NOT EXISTS idx_agent_notifications_read ON agent_notifications(is_read);
