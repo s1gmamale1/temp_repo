@@ -1,0 +1,26 @@
+{
+  "name": "project-claw-complete",
+  "version": "1.0.0",
+  "description": "Web HQ Dashboard for the Agent Network Platform.",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "start": "node src/server.js",
+    "dev": "node --watch src/server.js"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "dependencies": {
+    "@fastify/cors": "^11.2.0",
+    "@fastify/rate-limit": "^10.3.0",
+    "@fastify/websocket": "^11.2.0",
+    "axios": "^1.13.6",
+    "bcrypt": "^6.0.0",
+    "better-sqlite3": "^12.6.2",
+    "fastify": "^5.7.4",
+    "pg": "^8.19.0",
+    "uuid": "^13.0.0"
+  }
+}

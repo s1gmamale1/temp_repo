@@ -1,0 +1,120 @@
+# PROJECT-CLAW Production Docker Compose
+# Production overrides and additional services
+
+version: '3.8'
+
+services:
+  # Backend API Server - Production
+  api:
+    restart: always
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 512M
+        reservations:
+          cpus: '0.25'
+          memory: 128M
+    healthcheck:
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    # Production logging
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # Frontend Web HQ - Production
+  web:
+    restart: always
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 256M
+        reservations:
+          cpus: '0.1'
+          memory: 64M
+    healthcheck:
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # Optional: Automated Database Backups
+  # Uncomment to enable hourly backups
+  # db-backup:
+  #   image: alpine:latest
+  #   container_name: claw-db-backup
+  #   volumes:
+  #     - api-data:/data:ro
+  #     - ./backups:/backups
+  #   command: >
+  #     sh -c "
+  #       apk add --no-cache sqlite;
+  #       while true; do
+  #         sleep 3600;
+  #         cp /data/project-claw.db /backups/backup-$$(date +%Y%m%d-%H%M%S).db;
+  #         find /backups -name 'backup-*.db' -mtime +7 -delete;
+  #       done
+  #     "
+  #   restart: unless-stopped
+  #   profiles:
+  #     - backup
+
+  # Optional: Reverse Proxy with SSL (Let's Encrypt)
+  # Use this instead of direct nginx if you need SSL
+  # traefik:
+  #   image: traefik:v3.0
+  #   container_name: claw-traefik
+  #   command:
+  #     - "--api.insecure=true"
+  #     - "--providers.docker=true"
+  #     - "--providers.docker.exposedbydefault=false"
+  #     - "--entrypoints.websecure.address=:443"
+  #     - "--certificatesresolvers.letsencrypt.acme.tlschallenge=true"
+  #     - "--certificatesresolvers.letsencrypt.acme.email=your-email@example.com"
+  #     - "--certificatesresolvers.letsencrypt.acme.storage=/letsencrypt/acme.json"
+  #   ports:
+  #     - "443:443"
+  #   volumes:
+  #     - /var/run/docker.sock:/var/run/docker.sock:ro
+  #     - ./letsencrypt:/letsencrypt
+  #   networks:
+  #     - claw-network
+  #   profiles:
+  #     - ssl
+
+  # Optional: Redis for caching (future enhancement)
+  # redis:
+  #   image: redis:7-alpine
+  #   container_name: claw-redis
+  #   restart: always
+  #   volumes:
+  #     - redis-data:/data
+  #   networks:
+  #     - claw-network
+  #   profiles:
+  #     - cache
+
+volumes:
+  api-data:
+    driver: local
+  # redis-data:
+  #   driver: local
+
+# Production network configuration
+networks:
+  claw-network:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.20.0.0/16

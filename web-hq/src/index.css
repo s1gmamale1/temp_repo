@@ -1,0 +1,455 @@
+@import "tailwindcss";
+@import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500;600;700&family=Space+Grotesk:wght@300;400;500;600;700&display=swap');
+
+/* ============================================================
+   PROJECT-CLAW — OPS TERMINAL THEME
+   Amber-on-obsidian, monospaced data, editorial density
+   ============================================================ */
+
+:root {
+  /* Core palette */
+  --ink:       #080c0f;
+  --ink-1:     #0d1117;
+  --ink-2:     #141b22;
+  --ink-3:     #1c2530;
+  --ink-4:     #243040;
+  --wire:      #1e3a4a;
+  --wire-soft: #1a2e3b;
+
+  /* Amber signal */
+  --amber:     #f59e0b;
+  --amber-dim: #b45309;
+  --amber-glow: rgba(245, 158, 11, 0.12);
+  --amber-line: rgba(245, 158, 11, 0.25);
+
+  /* Semantic */
+  --green:  #10b981;
+  --red:    #ef4444;
+  --blue:   #3b82f6;
+  --purple: #8b5cf6;
+  --cyan:   #06b6d4;
+
+  /* Text */
+  --text-hi:   #e2e8f0;
+  --text-mid:  #94a3b8;
+  --text-lo:   #475569;
+  --text-dim:  #2d3f52;
+
+  /* Typography */
+  --font-mono: 'JetBrains Mono', 'Fira Code', monospace;
+  --font-ui:   'Space Grotesk', system-ui, sans-serif;
+
+  --transition-fast: 120ms;
+  --transition-base: 220ms;
+  --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+/* ============================================================ Reset / Base */
+
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+html { height: 100%; }
+
+body {
+  height: 100%;
+  background-color: var(--ink-1);
+  color: var(--text-hi);
+  font-family: var(--font-ui);
+  font-size: 14px;
+  line-height: 1.6;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+#root { height: 100%; }
+
+/* Scan-line overlay on body */
+body::before {
+  content: '';
+  position: fixed;
+  inset: 0;
+  background-image: repeating-linear-gradient(
+    0deg,
+    transparent,
+    transparent 2px,
+    rgba(0,0,0,0.03) 2px,
+    rgba(0,0,0,0.03) 4px
+  );
+  pointer-events: none;
+  z-index: 9999;
+}
+
+/* ============================================================ Scrollbar */
+
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--ink-4) var(--ink-2);
+}
+*::-webkit-scrollbar { width: 6px; height: 6px; }
+*::-webkit-scrollbar-track { background: var(--ink-2); }
+*::-webkit-scrollbar-thumb { background: var(--ink-4); border-radius: 3px; }
+*::-webkit-scrollbar-thumb:hover { background: var(--amber-dim); }
+
+/* ============================================================ Typography */
+
+.font-mono { font-family: var(--font-mono) !important; }
+
+h1, h2, h3, h4, h5, h6 {
+  font-family: var(--font-ui);
+  font-weight: 600;
+  color: var(--text-hi);
+  letter-spacing: -0.01em;
+}
+
+/* ============================================================ OPS Components */
+
+/* Panel — main card unit */
+.ops-panel {
+  background: var(--ink-2);
+  border: 1px solid var(--ink-4);
+  border-radius: 2px;
+  position: relative;
+}
+
+.ops-panel::before {
+  content: '';
+  position: absolute;
+  top: 0; left: 0; right: 0;
+  height: 1px;
+  background: linear-gradient(90deg, transparent, var(--amber-line), transparent);
+}
+
+/* Stat card */
+.ops-stat {
+  background: var(--ink-2);
+  border: 1px solid var(--ink-4);
+  border-radius: 2px;
+  padding: 1.25rem;
+  position: relative;
+  overflow: hidden;
+  transition: border-color var(--transition-fast);
+}
+.ops-stat::after {
+  content: '';
+  position: absolute;
+  bottom: 0; left: 0;
+  width: 2px; height: 100%;
+  background: var(--amber);
+  opacity: 0.4;
+}
+.ops-stat:hover { border-color: var(--amber-line); }
+
+/* Label */
+.ops-label {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--amber);
+  opacity: 0.8;
+}
+
+/* Value — big numbers */
+.ops-value {
+  font-family: var(--font-mono);
+  font-size: 2rem;
+  font-weight: 700;
+  color: var(--text-hi);
+  line-height: 1.1;
+  letter-spacing: -0.02em;
+}
+
+/* Tag / badge */
+.ops-badge {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  padding: 2px 8px;
+  border-radius: 2px;
+  font-weight: 500;
+}
+.ops-badge-green  { background: rgba(16,185,129,.15); color: #10b981; border: 1px solid rgba(16,185,129,.3); }
+.ops-badge-red    { background: rgba(239, 68, 68,.15); color: #ef4444; border: 1px solid rgba(239,68,68,.3); }
+.ops-badge-amber  { background: var(--amber-glow); color: var(--amber); border: 1px solid var(--amber-line); }
+.ops-badge-blue   { background: rgba(59,130,246,.15); color: #60a5fa; border: 1px solid rgba(59,130,246,.3); }
+.ops-badge-purple { background: rgba(139,92,246,.15); color: #a78bfa; border: 1px solid rgba(139,92,246,.3); }
+.ops-badge-gray   { background: rgba(71,85,105,.25); color: #94a3b8; border: 1px solid rgba(71,85,105,.4); }
+
+/* Divider */
+.ops-divider {
+  border: none;
+  border-top: 1px solid var(--ink-4);
+}
+
+/* Progress bar */
+.ops-bar-track {
+  height: 3px;
+  background: var(--ink-4);
+  border-radius: 0;
+  overflow: hidden;
+}
+.ops-bar-fill {
+  height: 100%;
+  background: linear-gradient(90deg, var(--amber-dim), var(--amber));
+  transition: width 0.8s var(--ease-out);
+}
+.ops-bar-fill-green { background: linear-gradient(90deg, #059669, #10b981); }
+.ops-bar-fill-red   { background: linear-gradient(90deg, #b91c1c, #ef4444); }
+
+/* Section header */
+.ops-section-header {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.15em;
+  text-transform: uppercase;
+  color: var(--amber);
+  padding-bottom: 0.5rem;
+  border-bottom: 1px solid var(--ink-4);
+  margin-bottom: 1rem;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+.ops-section-header::before {
+  content: '//';
+  color: var(--amber-dim);
+}
+
+/* Button */
+.ops-btn {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  padding: 6px 14px;
+  border: 1px solid var(--ink-4);
+  border-radius: 2px;
+  background: var(--ink-3);
+  color: var(--text-mid);
+  cursor: pointer;
+  transition: all var(--transition-fast);
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.ops-btn:hover {
+  border-color: var(--amber-line);
+  color: var(--amber);
+  background: var(--amber-glow);
+}
+.ops-btn-primary {
+  background: var(--amber-glow);
+  border-color: var(--amber-line);
+  color: var(--amber);
+}
+.ops-btn-primary:hover {
+  background: rgba(245,158,11,.2);
+  border-color: var(--amber);
+}
+.ops-btn-danger {
+  border-color: rgba(239,68,68,.3);
+  color: #ef4444;
+  background: rgba(239,68,68,.08);
+}
+.ops-btn-danger:hover {
+  background: rgba(239,68,68,.15);
+  border-color: #ef4444;
+}
+
+/* Input */
+.ops-input {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  background: var(--ink-1);
+  border: 1px solid var(--ink-4);
+  border-radius: 2px;
+  padding: 8px 12px;
+  color: var(--text-hi);
+  transition: border-color var(--transition-fast);
+  width: 100%;
+}
+.ops-input::placeholder { color: var(--text-lo); }
+.ops-input:focus {
+  outline: none;
+  border-color: var(--amber-line);
+  box-shadow: 0 0 0 2px var(--amber-glow);
+}
+
+/* Sidebar nav item */
+.ops-nav-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 12px;
+  border-radius: 2px;
+  color: var(--text-lo);
+  font-size: 12px;
+  font-family: var(--font-mono);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  transition: all var(--transition-fast);
+  cursor: pointer;
+  text-decoration: none;
+  border-left: 2px solid transparent;
+}
+.ops-nav-item:hover {
+  color: var(--text-mid);
+  background: var(--ink-3);
+}
+.ops-nav-item.active {
+  color: var(--amber);
+  border-left-color: var(--amber);
+  background: var(--amber-glow);
+}
+
+/* Table */
+.ops-table { width: 100%; border-collapse: collapse; }
+.ops-table th {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--text-lo);
+  padding: 8px 12px;
+  text-align: left;
+  border-bottom: 1px solid var(--ink-4);
+  font-weight: 500;
+}
+.ops-table td {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--ink-3);
+  color: var(--text-mid);
+}
+.ops-table tr:last-child td { border-bottom: none; }
+.ops-table tr:hover td { background: var(--ink-3); color: var(--text-hi); }
+
+/* Status dot */
+.ops-dot {
+  display: inline-block;
+  width: 6px; height: 6px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+.ops-dot-green  { background: #10b981; box-shadow: 0 0 6px #10b981; }
+.ops-dot-amber  { background: var(--amber); box-shadow: 0 0 6px var(--amber); }
+.ops-dot-red    { background: #ef4444; box-shadow: 0 0 6px #ef4444; }
+.ops-dot-gray   { background: var(--text-lo); }
+.ops-dot-blue   { background: #3b82f6; box-shadow: 0 0 6px #3b82f6; }
+.ops-dot-purple { background: #8b5cf6; }
+
+/* Pulse animation for live dots */
+@keyframes ops-pulse {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50%       { opacity: 0.5; transform: scale(0.85); }
+}
+.ops-dot-pulse { animation: ops-pulse 2s ease-in-out infinite; }
+
+/* Animated amber line at top of panels */
+@keyframes ops-line-scan {
+  0%   { background-position: -200% center; }
+  100% { background-position: 200% center; }
+}
+
+/* ============================================================ Grid / Layout */
+
+/* System grid background */
+.ops-grid-bg {
+  background-image:
+    linear-gradient(var(--ink-3) 1px, transparent 1px),
+    linear-gradient(90deg, var(--ink-3) 1px, transparent 1px);
+  background-size: 32px 32px;
+  background-color: var(--ink-1);
+}
+
+/* ============================================================ Animations */
+
+@keyframes shimmer {
+  0%   { background-position: -200% 0; }
+  100% { background-position: 200% 0; }
+}
+
+.animate-shimmer {
+  background: linear-gradient(90deg, var(--ink-2) 25%, var(--ink-3) 50%, var(--ink-2) 75%);
+  background-size: 200% 100%;
+  animation: shimmer 1.5s infinite;
+}
+
+@keyframes toast-slide-in {
+  from { transform: translateX(110%); opacity: 0; }
+  to   { transform: translateX(0);    opacity: 1; }
+}
+@keyframes toast-slide-out {
+  from { transform: translateX(0);    opacity: 1; }
+  to   { transform: translateX(110%); opacity: 0; }
+}
+
+.toast-enter { animation: toast-slide-in var(--transition-base) var(--ease-out) forwards; }
+.toast-exit  { animation: toast-slide-out var(--transition-fast) ease-in forwards; }
+
+@keyframes fade-up {
+  from { opacity: 0; transform: translateY(8px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+.animate-fade-up { animation: fade-up 0.3s var(--ease-out) both; }
+
+/* Typing dot */
+@keyframes typing-dot {
+  0%, 60%, 100% { transform: translateY(0); opacity: 0.6; }
+  30%           { transform: translateY(-4px); opacity: 1; }
+}
+.typing-dot { animation: typing-dot 1.4s infinite ease-in-out both; }
+.typing-dot:nth-child(1) { animation-delay: -0.32s; }
+.typing-dot:nth-child(2) { animation-delay: -0.16s; }
+
+/* ============================================================ Focus */
+
+button:focus-visible, a:focus-visible, input:focus-visible, textarea:focus-visible {
+  outline: 1px solid var(--amber);
+  outline-offset: 2px;
+}
+
+::selection {
+  background: var(--amber-glow);
+  color: var(--amber);
+}
+
+/* ============================================================ Recharts overrides */
+
+.recharts-cartesian-grid-horizontal line,
+.recharts-cartesian-grid-vertical line {
+  stroke: var(--ink-4) !important;
+}
+.recharts-text { fill: var(--text-lo) !important; font-family: var(--font-mono) !important; font-size: 10px !important; }
+.recharts-tooltip-wrapper { z-index: 100; }
+
+/* ============================================================ Sidebar */
+
+.ops-sidebar {
+  width: 220px;
+  min-width: 220px;
+  background: var(--ink-2);
+  border-right: 1px solid var(--ink-4);
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+}
+
+.ops-sidebar-logo {
+  padding: 1.25rem 1rem;
+  border-bottom: 1px solid var(--ink-4);
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.ops-sidebar-logo-text {
+  font-family: var(--font-mono);
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  color: var(--amber);
+}
+

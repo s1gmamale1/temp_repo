@@ -1,0 +1,3995 @@
+/**
+ * API Routes - All Endpoints
+ * Projects, Tasks, Costs, Chat, Auth
+ */
+
+const { getDb, generateId } = require('./database');
+const wsManager = require('./websocket');
+const {
+  syncOpenRouterUsage,
+  getActualCosts,
+  getBudgetVsActual,
+  getModelCosts,
+  fetchOpenRouterCredits
+} = require('./openrouter');
+const { getAllRealCosts } = require('./real-costs');
+const {
+  sendMessage,
+  getChannelHistory,
+  getDmHistory,
+  getUserDmChannels,
+  processIncomingMessage,
+  editMessage,
+  deleteMessage,
+  createChannel,
+  getOrCreateDMChannel,
+  getChannels,
+  getChannelMessages,
+  sendChannelMessage
+} = require('./chat');
+const {
+  getTokenDashboard,
+  getContextTokenStats,
+  checkProviderStatus,
+  storeTokenUsage,
+  getKimiUsage,
+  getOpenAIUsage,
+  getClaudeUsage
+} = require('./token-dashboard');
+
+const {
+  getDashboardSummary,
+  getProviderDetails,
+  getDailyUsage,
+  getModelsBreakdown
+} = require('./token-monitoring');
+const {
+  createUser,
+  registerUser,
+  getOrCreateUserFromTelegram,
+  getUserById,
+  getUserByLogin,
+  listUsers,
+  createSession,
+  invalidateSession,
+  getUserByToken,
+  authenticateUser,
+  adminMiddleware,
+  requireRole
+} = require('./auth');
+
+// ============================================================================
+// PROJECT ROUTES
+// ============================================================================
+
+// GET /api/projects - List all projects
+async function listProjects(request, reply) {
+  const db = getDb();
+  const { status, limit = 20, offset = 0 } = request.query;
+
+  let query = 'SELECT * FROM projects';
+  const params = [];
+
+  if (status) {
+    query += ' WHERE status = ?';
+    params.push(status);
+  }
+
+  query += ' ORDER BY created_at DESC LIMIT ? OFFSET ?';
+  params.push(parseInt(limit), parseInt(offset));
+
+  const projects = db.prepare(query).all(...params);
+
+  let countQuery = 'SELECT COUNT(*) as total FROM projects';
+  if (status) countQuery += ' WHERE status = ?';
+  const { total } = db.prepare(countQuery).get(status ? [status] : []);
+
+  return {
+    projects: projects.map(p => ({
+      ...p,
+      config: JSON.parse(p.config || '{}')
+    })),
+    total,
+    limit: parseInt(limit),
+    offset: parseInt(offset)
+  };
+}
+
+// GET /api/projects/:id - Get project details
+async function getProject(request, reply) {
+  const db = getDb();
+  const { id } = request.params;
+
+  const project = db.prepare('SELECT * FROM projects WHERE id = ?').get(id);
+
+  if (!project) {
+    reply.code(404);
+    return { error: 'Project not found' };
+  }
+
+  const { agent_count } = db.prepare('SELECT COUNT(*) as agent_count FROM agents WHERE project_id = ?').get(id);
+  const { task_count } = db.prepare('SELECT COUNT(*) as task_count FROM tasks WHERE project_id = ?').get(id);
+
+  // Get active budgets
+  const budgets = db.prepare('SELECT * FROM budgets WHERE project_id = ? AND is_active = 1').all(id);
+
+  return {
+    ...project,
+    config: JSON.parse(project.config || '{}'),
+    agent_count,
+    task_count,
+    budgets
+  };
+}
+
+// POST /api/projects - Create new project
+async function createProject(request, reply) {
+  const db = getDb();
+  const { name, description, config = {} } = request.body;
+  const owner_id = request.user?.id || 'system';
+
+  if (!name) {
+    reply.code(400);
+    return { error: 'Name is required' };
+  }
+
+  const id = generateId();
+
+  db.prepare(`
+    INSERT INTO projects (id, name, description, owner_id, config)
+    VALUES (?, ?, ?, ?, ?)
+  `).run(id, name, description || null, owner_id, JSON.stringify(config));
+
+  // Auto-create project channel
+  try {
+    const { createChannel } = require('./chat');
+    const channel = await createChannel({
+      name: `project-${name}`,
+      type: 'project',
+      projectId: id,
+      createdBy: owner_id
+    });
+
+    // Send notification to admin via DM if admin is not the owner
+    if (owner_id !== 'system') {
+      const admin = db.prepare("SELECT id FROM users WHERE role = 'admin' LIMIT 1").get();
+      if (admin && admin.id !== owner_id) {
+        const { getOrCreateDMChannel, sendChannelMessage } = require('./chat');
+        const dmChannel = await getOrCreateDMChannel(admin.id, owner_id);
+        await sendChannelMessage(admin.id, dmChannel.id, `New project "${name}" has been created.`);
+      }
+    }
+
+    reply.code(201);
+    return {
+      id,
+      name,
+      description,
+      status: 'active',
+      owner_id,
+      channel_id: channel.id,
+      created_at: new Date().toISOString()
+    };
+  } catch (err) {
+    console.error('Error creating project channel:', err);
+    reply.code(201);
+    return {
+      id,
+      name,
+      description,
+      status: 'active',
+      owner_id,
+      created_at: new Date().toISOString()
+    };
+  }
+}
+
+// PATCH /api/projects/:id/status - Update project status
+async function updateProjectStatus(request, reply) {
+  const db = getDb();
+  const { id } = request.params;
+  const { status } = request.body;
+
+  const project = db.prepare('SELECT status FROM projects WHERE id = ?').get(id);
+  if (!project) {
+    reply.code(404);
+    return { error: 'Project not found' };
+  }
+
+  const oldStatus = project.status;
+  const now = new Date().toISOString();
+
+  db.prepare('UPDATE projects SET status = ?, updated_at = ? WHERE id = ?')
+    .run(status, now, id);
+
+  wsManager.emitProjectStatusChanged(id, oldStatus, status);
+
+  return { id, old_status: oldStatus, new_status: status, updated_at: now };
+}
+
+// ============================================================================
+// TASK ROUTES - PHASE 3 IMPLEMENTATION
+// ============================================================================
+
+// GET /api/projects/:id/tasks - Get project tasks with full details
+async function getProjectTasks(request, reply) {
+  const db = getDb();
+  const { id } = request.params;
+  const { status, agent_id, priority, limit = 50, offset = 0 } = request.query;
+
+  const project = db.prepare('SELECT id, name FROM projects WHERE id = ?').get(id);
+  if (!project) {
+    reply.code(404);
+    return { error: 'Project not found' };
+  }
+
+  let query = `
+    SELECT 
+      t.*,
+      ma.name as agent_name,
+      ma.handle as agent_handle,
+      ma.avatar_url as agent_avatar,
+      ma.status as agent_status,
+      u.name as assigned_by_name
+    FROM tasks t
+    LEFT JOIN manager_agents ma ON t.agent_id = ma.id
+    LEFT JOIN users u ON t.assigned_by = u.id
+    WHERE t.project_id = ?
+  `;
+  const params = [id];
+
+  if (status) {
+    query += ' AND t.status = ?';
+    params.push(status);
+  }
+
+  if (agent_id) {
+    query += ' AND t.agent_id = ?';
+    params.push(agent_id);
+  }
+
+  if (priority) {
+    query += ' AND t.priority = ?';
+    params.push(parseInt(priority));
+  }
+
+  query += ' ORDER BY t.created_at DESC LIMIT ? OFFSET ?';
+  params.push(parseInt(limit), parseInt(offset));
+
+  const tasks = db.prepare(query).all(...params);
+
+  // Get stats
+  const statsQuery = db.prepare(`
+    SELECT 
+      COUNT(*) as total,
+      SUM(CASE WHEN status = 'pending' THEN 1 ELSE 0 END) as pending,
+      SUM(CASE WHEN status = 'running' THEN 1 ELSE 0 END) as running,
+      SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) as completed,
+      SUM(CASE WHEN status = 'cancelled' THEN 1 ELSE 0 END) as cancelled
+    FROM tasks WHERE project_id = ?
+  `).get(id);
+
+  return {
+    tasks: tasks.map(t => ({
+      ...t,
+      payload: JSON.parse(t.payload || '{}'),
+      result: t.result ? JSON.parse(t.result) : null,
+      tags: JSON.parse(t.tags || '[]'),
+      agent: t.agent_id ? {
+        id: t.agent_id,
+        name: t.agent_name,
+        handle: t.agent_handle,
+        avatar_url: t.agent_avatar,
+        status: t.agent_status
+      } : null
+    })),
+    total: statsQuery.total,
+    stats: {
+      pending: statsQuery.pending || 0,
+      running: statsQuery.running || 0,
+      completed: statsQuery.completed || 0,
+      cancelled: statsQuery.cancelled || 0
+    }
+  };
+}
+
+// POST /api/tasks - Create new task with optional assignment
+async function createTask(request, reply) {
+  const db = getDb();
+  const userId = request.user?.id;
+  const {
+    project_id,
+    title,
+    description,
+    priority = 2,
+    agent_id,
+    due_date,
+    estimated_hours,
+    tags = [],
+    payload = {}
+  } = request.body;
+
+  if (!project_id || !title) {
+    reply.code(400);
+    return { error: 'project_id and title are required' };
+  }
+
+  const project = db.prepare('SELECT id, name FROM projects WHERE id = ?').get(project_id);
+  if (!project) {
+    reply.code(404);
+    return { error: 'Project not found' };
+  }
+
+  // Validate agent if provided
+  if (agent_id) {
+    const agent = db.prepare('SELECT * FROM manager_agents WHERE id = ? AND is_approved = TRUE').get(agent_id);
+    if (!agent) {
+      reply.code(404);
+      return { error: 'Agent not found or not approved' };
+    }
+
+    // Check if agent is assigned to project
+    const projectAssignment = db.prepare(
+      'SELECT * FROM agent_projects WHERE agent_id = ? AND project_id = ? AND status = ?'
+    ).get(agent_id, project_id, 'active');
+
+    if (!projectAssignment) {
+      reply.code(400);
+      return { error: 'Agent is not assigned to this project' };
+    }
+  }
+
+  const id = generateId();
+  const now = new Date().toISOString();
+
+  db.prepare(`
+    INSERT INTO tasks (
+      id, project_id, agent_id, title, description, priority, 
+      assigned_by, assigned_at, due_date, estimated_hours, tags, 
+      payload, created_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(
+    id,
+    project_id,
+    agent_id || null,
+    title,
+    description || null,
+    priority,
+    agent_id ? userId : null,
+    agent_id ? now : null,
+    due_date || null,
+    estimated_hours || null,
+    JSON.stringify(tags),
+    JSON.stringify(payload),
+    now,
+    now
+  );
+
+  // Create assignment history if assigned
+  if (agent_id) {
+    db.prepare(`
+      INSERT INTO task_assignment_history (id, task_id, agent_id, assigned_by, assigned_at)
+      VALUES (?, ?, ?, ?, ?)
+    `).run(generateId(), id, agent_id, userId, now);
+  }
+
+  const task = {
+    id,
+    project_id,
+    title,
+    description,
+    status: 'pending',
+    priority,
+    agent_id: agent_id || null,
+    assigned_by: agent_id ? userId : null,
+    assigned_at: agent_id ? now : null,
+    created_at: now
+  };
+
+  wsManager.emitTaskCreated(project_id, task);
+
+  // Send DM notification if task assigned
+  let dmChannelId = null;
+  if (agent_id) {
+    try {
+      const { getOrCreateDMChannel, sendChannelMessage } = require('./chat');
+      const dmChannel = await getOrCreateDMChannel(userId, agent_id);
+      dmChannelId = dmChannel.id;
+
+      const message = formatTaskAssignmentDM({ title, description }, project, null);
+      await sendChannelMessage(userId, dmChannel.id, message);
+
+      wsManager.emitTaskAssigned(project_id, {
+        task_id: id,
+        agent_id,
+        assigned_by: userId,
+        dm_channel_id: dmChannel.id
+      });
+    } catch (dmErr) {
+      console.error('Error sending assignment DM:', dmErr);
+    }
+  }
+
+  reply.code(201);
+  return {
+    ...task,
+    notification_sent: !!agent_id,
+    dm_channel_id: dmChannelId
+  };
+}
+
+// GET /api/tasks/:id - Get task details
+async function getTaskById(request, reply) {
+  const db = getDb();
+  const { id } = request.params;
+
+  const task = db.prepare(`
+    SELECT 
+      t.*,
+      p.name as project_name,
+      ma.name as agent_name,
+      ma.handle as agent_handle,
+      ma.avatar_url as agent_avatar,
+      ma.status as agent_status,
+      u.name as assigned_by_name,
+      cu.name as cancelled_by_name
+    FROM tasks t
+    JOIN projects p ON t.project_id = p.id
+    LEFT JOIN manager_agents ma ON t.agent_id = ma.id
+    LEFT JOIN users u ON t.assigned_by = u.id
+    LEFT JOIN users cu ON t.cancelled_by = cu.id
+    WHERE t.id = ?
+  `).get(id);
+
+  if (!task) {
+    reply.code(404);
+    return { error: 'Task not found' };
+  }
+
+  // Get comments
+  const comments = db.prepare(`
+    SELECT 
+      tc.*,
+      u.name as author_name,
+      u.avatar_url as author_avatar,
+      ma.name as author_agent_name,
+      ma.handle as author_agent_handle
+    FROM task_comments tc
+    LEFT JOIN users u ON tc.author_id = u.id
+    LEFT JOIN manager_agents ma ON tc.author_agent_id = ma.id
+    WHERE tc.task_id = ?
+    ORDER BY tc.created_at ASC
+  `).all(id);
+
+  // Get assignment history
+  const history = db.prepare(`
+    SELECT 
+      tah.*,
+      ma.name as agent_name,
+      ma.handle as agent_handle,
+      ab.name as assigned_by_name,
+      ub.name as unassigned_by_name
+    FROM task_assignment_history tah
+    LEFT JOIN manager_agents ma ON tah.agent_id = ma.id
+    LEFT JOIN users ab ON tah.assigned_by = ab.id
+    LEFT JOIN users ub ON tah.unassigned_by = ub.id
+    WHERE tah.task_id = ?
+    ORDER BY tah.assigned_at DESC
+  `).all(id);
+
+  return {
+    ...task,
+    payload: JSON.parse(task.payload || '{}'),
+    result: task.result ? JSON.parse(task.result) : null,
+    tags: JSON.parse(task.tags || '[]'),
+    project: {
+      id: task.project_id,
+      name: task.project_name
+    },
+    agent: task.agent_id ? {
+      id: task.agent_id,
+      name: task.agent_name,
+      handle: task.agent_handle,
+      avatar_url: task.agent_avatar,
+      status: task.agent_status
+    } : null,
+    assigned_by: task.assigned_by ? {
+      id: task.assigned_by,
+      name: task.assigned_by_name
+    } : null,
+    cancelled_by: task.cancelled_by ? {
+      id: task.cancelled_by,
+      name: task.cancelled_by_name
+    } : null,
+    comments: comments.map(c => ({
+      ...c,
+      metadata: JSON.parse(c.metadata || '{}')
+    })),
+    assignment_history: history
+  };
+}
+
+// PATCH /api/tasks/:id - Update task
+async function updateTask(request, reply) {
+  const db = getDb();
+  const { id } = request.params;
+  const userId = request.user?.id;
+  const {
+    title,
+    description,
+    priority,
+    due_date,
+    estimated_hours,
+    tags,
+    payload
+  } = request.body;
+
+  const task = db.prepare('SELECT * FROM tasks WHERE id = ?').get(id);
+  if (!task) {
+    reply.code(404);
+    return { error: 'Task not found' };
+  }
+
+  const now = new Date().toISOString();
+  const updates = [];
+  const params = [];
+  const changes = {};
+
+  if (title !== undefined) {
+    updates.push('title = ?');
+    params.push(title);
+    changes.title = title;
+  }
+  if (description !== undefined) {
+    updates.push('description = ?');
+    params.push(description);
+    changes.description = description;
+  }
+  if (priority !== undefined) {
+    updates.push('priority = ?');
+    params.push(priority);
+    changes.priority = priority;
+  }
+  if (due_date !== undefined) {
+    updates.push('due_date = ?');
+    params.push(due_date);
+    changes.due_date = due_date;
+  }
+  if (estimated_hours !== undefined) {
+    updates.push('estimated_hours = ?');
+    params.push(estimated_hours);
+    changes.estimated_hours = estimated_hours;
+  }
+  if (tags !== undefined) {
+    updates.push('tags = ?');
+    params.push(JSON.stringify(tags));
+    changes.tags = tags;
+  }
+  if (payload !== undefined) {
+    const mergedPayload = { ...JSON.parse(task.payload || '{}'), ...payload };
+    updates.push('payload = ?');
+    params.push(JSON.stringify(mergedPayload));
+    changes.payload = payload;
+  }
+
+  if (updates.length === 0) {
+    return { message: 'No updates provided' };
+  }
+
+  updates.push('updated_at = ?');
+  params.push(now);
+  params.push(id);
+
+  db.prepare(`UPDATE tasks SET ${updates.join(', ')} WHERE id = ?`).run(...params);
+
+  wsManager.emitTaskUpdated(task.project_id, { task_id: id, changes, updated_by: userId });
+
+  return {
+    id,
+    changes,
+    updated_at: now,
+    updated_by: userId
+  };
+}
+
+// DELETE /api/tasks/:id - Delete task
+async function deleteTask(request, reply) {
+  const db = getDb();
+  const { id } = request.params;
+  const user = request.user;
+
+  // Only admins can delete tasks
+  if (!user || user.role !== 'admin') {
+    reply.code(403);
+    return { error: 'Admin access required' };
+  }
+
+  const task = db.prepare('SELECT * FROM tasks WHERE id = ?').get(id);
+  if (!task) {
+    reply.code(404);
+    return { error: 'Task not found' };
+  }
+
+  // Delete related records first
+  db.prepare('DELETE FROM task_comments WHERE task_id = ?').run(id);
+  db.prepare('DELETE FROM task_assignment_history WHERE task_id = ?').run(id);
+
+  // Delete task
+  db.prepare('DELETE FROM tasks WHERE id = ?').run(id);
+
+  wsManager.emitTaskDeleted(task.project_id, { task_id: id, deleted_by: user.id });
+
+  return { success: true, id, deleted_at: new Date().toISOString() };
+}
+
+// POST /api/tasks/:id/assign - Assign task to agent
+async function assignTask(request, reply) {
+  const db = getDb();
+  const { id } = request.params;
+  const userId = request.user?.id;
+  const { agent_id, notify = true, message: customMessage } = request.body;
+
+  if (!agent_id) {
+    reply.code(400);
+    return { error: 'agent_id is required' };
+  }
+
+  const task = db.prepare(`
+    SELECT t.*, p.name as project_name 
+    FROM tasks t 
+    JOIN projects p ON t.project_id = p.id 
+    WHERE t.id = ?
+  `).get(id);
+
+  if (!task) {
+    reply.code(404);
+    return { error: 'Task not found' };
+  }
+
+  // Validate agent
+  const agent = db.prepare('SELECT * FROM manager_agents WHERE id = ? AND is_approved = TRUE').get(agent_id);
+  if (!agent) {
+    reply.code(404);
+    return { error: 'Agent not found or not approved' };
+  }
+
+  // Check if agent is assigned to project
+  const projectAssignment = db.prepare(
+    'SELECT * FROM agent_projects WHERE agent_id = ? AND project_id = ? AND status = ?'
+  ).get(agent_id, task.project_id, 'active');
+
+  if (!projectAssignment) {
+    reply.code(400);
+    return { error: 'Agent is not assigned to this project' };
+  }
+
+  const now = new Date().toISOString();
+  const previousAgentId = task.agent_id;
+
+  // Update task assignment
+  db.prepare(`
+    UPDATE tasks 
+    SET agent_id = ?, assigned_by = ?, assigned_at = ?, updated_at = ? 
+    WHERE id = ?
+  `).run(agent_id, userId, now, now, id);
+
+  // Close previous assignment history if exists
+  if (previousAgentId) {
+    db.prepare(`
+      UPDATE task_assignment_history 
+      SET unassigned_at = ?, unassigned_by = ? 
+      WHERE task_id = ? AND agent_id = ? AND unassigned_at IS NULL
+    `).run(now, userId, id, previousAgentId);
+
+    wsManager.emitTaskUnassigned(task.project_id, {
+      task_id: id,
+      previous_agent_id: previousAgentId,
+      unassigned_by: userId
+    });
+  }
+
+  // Create new assignment history
+  db.prepare(`
+    INSERT INTO task_assignment_history (id, task_id, agent_id, assigned_by, assigned_at)
+    VALUES (?, ?, ?, ?, ?)
+  `).run(generateId(), id, agent_id, userId, now);
+
+  // Get or create DM channel and send notification
+  let dmChannelId = null;
+  if (notify) {
+    try {
+      const { getOrCreateDMChannel, sendChannelMessage } = require('./chat');
+      const dmChannel = await getOrCreateDMChannel(userId, agent_id);
+      dmChannelId = dmChannel.id;
+
+      const project = { name: task.project_name };
+      const message = formatTaskAssignmentDM(task, project, customMessage);
+      await sendChannelMessage(userId, dmChannel.id, message);
+    } catch (dmErr) {
+      console.error('Error sending assignment DM:', dmErr);
+    }
+  }
+
+  wsManager.emitTaskAssigned(task.project_id, {
+    task_id: id,
+    agent_id,
+    previous_agent_id: previousAgentId,
+    assigned_by: userId,
+    dm_channel_id: dmChannelId
+  });
+
+  return {
+    id,
+    agent_id,
+    previous_agent_id: previousAgentId,
+    assigned_by: userId,
+    assigned_at: now,
+    notification_sent: notify,
+    dm_channel_id: dmChannelId
+  };
+}
+
+// POST /api/tasks/:id/accept - Agent accepts task
+async function acceptTask(request, reply) {
+  const db = getDb();
+  const { id } = request.params;
+  const userId = request.user?.id;
+
+  const task = db.prepare(`
+    SELECT t.*, p.name as project_name 
+    FROM tasks t 
+    JOIN projects p ON t.project_id = p.id 
+    WHERE t.id = ?
+  `).get(id);
+
+  if (!task) {
+    reply.code(404);
+    return { error: 'Task not found' };
+  }
+
+  // Verify agent is assigned to this task
+  if (task.agent_id !== userId) {
+    reply.code(403);
+    return { error: 'Only assigned agent can accept this task' };
+  }
+
+  const now = new Date().toISOString();
+
+  db.prepare('UPDATE tasks SET accepted_at = ?, updated_at = ? WHERE id = ?')
+    .run(now, now, id);
+
+  // Add system comment
+  db.prepare(`
+    INSERT INTO task_comments (id, task_id, author_agent_id, content, is_system, created_at)
+    VALUES (?, ?, ?, 'Task accepted', TRUE, ?)
+  `).run(generateId(), id, userId, now);
+
+  wsManager.emitTaskAccepted(task.project_id, {
+    task_id: id,
+    agent_id: userId,
+    accepted_at: now
+  });
+
+  return {
+    id,
+    status: task.status,
+    accepted_at: now,
+    accepted_by: userId
+  };
+}
+
+// POST /api/tasks/:id/reject - Agent rejects task
+async function rejectTask(request, reply) {
+  const db = getDb();
+  const { id } = request.params;
+  const userId = request.user?.id;
+  const { reason } = request.body;
+
+  const task = db.prepare(`
+    SELECT t.*, p.name as project_name 
+    FROM tasks t 
+    JOIN projects p ON t.project_id = p.id 
+    WHERE t.id = ?
+  `).get(id);
+
+  if (!task) {
+    reply.code(404);
+    return { error: 'Task not found' };
+  }
+
+  // Verify agent is assigned to this task
+  if (task.agent_id !== userId) {
+    reply.code(403);
+    return { error: 'Only assigned agent can reject this task' };
+  }
+
+  const now = new Date().toISOString();
+
+  // Unassign the task
+  db.prepare(`
+    UPDATE tasks 
+    SET agent_id = NULL, assigned_by = NULL, assigned_at = NULL, updated_at = ? 
+    WHERE id = ?
+  `).run(now, id);
+
+  // Close assignment history
+  db.prepare(`
+    UPDATE task_assignment_history 
+    SET unassigned_at = ?, unassigned_by = ? 
+    WHERE task_id = ? AND agent_id = ? AND unassigned_at IS NULL
+  `).run(now, userId, id, userId);
+
+  // Add system comment with rejection reason
+  const content = reason ? `Task rejected. Reason: ${reason}` : 'Task rejected';
+  db.prepare(`
+    INSERT INTO task_comments (id, task_id, author_agent_id, content, is_system, metadata, created_at)
+    VALUES (?, ?, ?, ?, TRUE, ?, ?)
+  `).run(generateId(), id, userId, content, JSON.stringify({ reason }), now);
+
+  // Notify the original assigner
+  if (task.assigned_by) {
+    try {
+      const { getOrCreateDMChannel, sendChannelMessage } = require('./chat');
+      const dmChannel = await getOrCreateDMChannel(userId, task.assigned_by);
+      const message = `🚫 TASK REJECTED\n\nTask: ${task.title}\nProject: ${task.project_name}\nRejected by: Agent\n${reason ? `Reason: ${reason}` : ''}`;
+      await sendChannelMessage(userId, dmChannel.id, message);
+    } catch (dmErr) {
+      console.error('Error sending rejection DM:', dmErr);
+    }
+  }
+
+  wsManager.emitTaskRejected(task.project_id, {
+    task_id: id,
+    agent_id: userId,
+    reason,
+    rejected_at: now
+  });
+
+  return {
+    id,
+    agent_id: null,
+    rejected_at: now,
+    rejected_by: userId,
+    reason
+  };
+}
+
+// POST /api/tasks/:id/start - Agent starts work on task
+async function startTask(request, reply) {
+  const db = getDb();
+  const { id } = request.params;
+  const userId = request.user?.id;
+  const { comment } = request.body || {};
+
+  const task = db.prepare(`
+    SELECT t.*, p.name as project_name 
+    FROM tasks t 
+    JOIN projects p ON t.project_id = p.id 
+    WHERE t.id = ?
+  `).get(id);
+
+  if (!task) {
+    reply.code(404);
+    return { error: 'Task not found' };
+  }
+
+  // Verify agent is assigned to this task
+  if (task.agent_id !== userId) {
+    reply.code(403);
+    return { error: 'Only assigned agent can start this task' };
+  }
+
+  // Validate status transition
+  if (task.status !== 'pending') {
+    reply.code(400);
+    return { error: `Cannot start task from status: ${task.status}` };
+  }
+
+  const now = new Date().toISOString();
+
+  db.prepare(`
+    UPDATE tasks 
+    SET status = 'running', started_at = ?, updated_at = ? 
+    WHERE id = ?
+  `).run(now, now, id);
+
+  // Add system comment
+  const content = comment ? `Task started. ${comment}` : 'Task started';
+  db.prepare(`
+    INSERT INTO task_comments (id, task_id, author_agent_id, content, is_system, metadata, created_at)
+    VALUES (?, ?, ?, ?, TRUE, ?, ?)
+  `).run(generateId(), id, userId, content, JSON.stringify({ comment }), now);
+
+  wsManager.emitTaskStarted(task.project_id, {
+    task_id: id,
+    agent_id: userId,
+    started_at: now,
+    comment
+  });
+
+  return {
+    id,
+    status: 'running',
+    started_at: now,
+    started_by: userId
+  };
+}
+
+// POST /api/tasks/:id/complete - Agent completes task
+async function completeTask(request, reply) {
+  const db = getDb();
+  const { id } = request.params;
+  const userId = request.user?.id;
+  const { result, comment } = request.body || {};
+
+  const task = db.prepare(`
+    SELECT t.*, p.name as project_name 
+    FROM tasks t 
+    JOIN projects p ON t.project_id = p.id 
+    WHERE t.id = ?
+  `).get(id);
+
+  if (!task) {
+    reply.code(404);
+    return { error: 'Task not found' };
+  }
+
+  // Verify agent is assigned to this task
+  if (task.agent_id !== userId) {
+    reply.code(403);
+    return { error: 'Only assigned agent can complete this task' };
+  }
+
+  // Validate status transition
+  if (task.status !== 'running') {
+    reply.code(400);
+    return { error: `Cannot complete task from status: ${task.status}` };
+  }
+
+  const now = new Date().toISOString();
+
+  db.prepare(`
+    UPDATE tasks 
+    SET status = 'completed', result = ?, completed_at = ?, updated_at = ? 
+    WHERE id = ?
+  `).run(result ? JSON.stringify(result) : null, now, now, id);
+
+  // Add system comment
+  const content = comment ? `Task completed. ${comment}` : 'Task completed';
+  db.prepare(`
+    INSERT INTO task_comments (id, task_id, author_agent_id, content, is_system, metadata, created_at)
+    VALUES (?, ?, ?, ?, TRUE, ?, ?)
+  `).run(generateId(), id, userId, content, JSON.stringify({ result, comment }), now);
+
+  wsManager.emitTaskCompleted(task.project_id, {
+    task_id: id,
+    agent_id: userId,
+    completed_at: now,
+    result,
+    comment
+  });
+
+  return {
+    id,
+    status: 'completed',
+    completed_at: now,
+    completed_by: userId,
+    result
+  };
+}
+
+// POST /api/tasks/:id/cancel - Cancel task
+async function cancelTask(request, reply) {
+  const db = getDb();
+  const { id } = request.params;
+  const userId = request.user?.id;
+  const { reason } = request.body || {};
+
+  const task = db.prepare(`
+    SELECT t.*, p.name as project_name 
+    FROM tasks t 
+    JOIN projects p ON t.project_id = p.id 
+    WHERE t.id = ?
+  `).get(id);
+
+  if (!task) {
+    reply.code(404);
+    return { error: 'Task not found' };
+  }
+
+  // Only assigned agent, assigner, or admin can cancel
+  const isAssignedAgent = task.agent_id === userId;
+  const isAssigner = task.assigned_by === userId;
+  const isAdmin = request.user?.role === 'admin';
+
+  if (!isAssignedAgent && !isAssigner && !isAdmin) {
+    reply.code(403);
+    return { error: 'Not authorized to cancel this task' };
+  }
+
+  // Validate status transition
+  if (task.status === 'completed' || task.status === 'cancelled') {
+    reply.code(400);
+    return { error: `Cannot cancel task with status: ${task.status}` };
+  }
+
+  const now = new Date().toISOString();
+
+  db.prepare(`
+    UPDATE tasks 
+    SET status = 'cancelled', cancelled_at = ?, cancelled_by = ?, updated_at = ? 
+    WHERE id = ?
+  `).run(now, userId, now, id);
+
+  // Add system comment
+  const content = reason ? `Task cancelled. Reason: ${reason}` : 'Task cancelled';
+  db.prepare(`
+    INSERT INTO task_comments (id, task_id, author_id, content, is_system, metadata, created_at)
+    VALUES (?, ?, ?, ?, TRUE, ?, ?)
+  `).run(generateId(), id, userId, content, JSON.stringify({ reason }), now);
+
+  wsManager.emitTaskCancelled(task.project_id, {
+    task_id: id,
+    cancelled_by: userId,
+    reason,
+    cancelled_at: now
+  });
+
+  return {
+    id,
+    status: 'cancelled',
+    cancelled_at: now,
+    cancelled_by: userId,
+    reason
+  };
+}
+
+// POST /api/tasks/:id/comments - Add comment to task
+async function addTaskComment(request, reply) {
+  const db = getDb();
+  const { id } = request.params;
+  const userId = request.user?.id;
+  const { content } = request.body;
+
+  if (!content || !content.trim()) {
+    reply.code(400);
+    return { error: 'Content is required' };
+  }
+
+  const task = db.prepare(`
+    SELECT t.*, p.name as project_name 
+    FROM tasks t 
+    JOIN projects p ON t.project_id = p.id 
+    WHERE t.id = ?
+  `).get(id);
+
+  if (!task) {
+    reply.code(404);
+    return { error: 'Task not found' };
+  }
+
+  const now = new Date().toISOString();
+  const commentId = generateId();
+
+  // Check if user is a manager agent
+  const agent = db.prepare('SELECT id FROM manager_agents WHERE id = ?').get(userId);
+
+  db.prepare(`
+    INSERT INTO task_comments (id, task_id, author_id, author_agent_id, content, created_at)
+    VALUES (?, ?, ?, ?, ?, ?)
+  `).run(commentId, id, agent ? null : userId, agent ? userId : null, content, now);
+
+  const comment = db.prepare(`
+    SELECT 
+      tc.*,
+      u.name as author_name,
+      u.avatar_url as author_avatar,
+      ma.name as author_agent_name,
+      ma.handle as author_agent_handle
+    FROM task_comments tc
+    LEFT JOIN users u ON tc.author_id = u.id
+    LEFT JOIN manager_agents ma ON tc.author_agent_id = ma.id
+    WHERE tc.id = ?
+  `).get(commentId);
+
+  wsManager.emitCommentAdded(task.project_id, {
+    task_id: id,
+    comment_id: commentId,
+    author_id: userId,
+    content,
+    created_at: now
+  });
+
+  reply.code(201);
+  return {
+    ...comment,
+    metadata: JSON.parse(comment.metadata || '{}')
+  };
+}
+
+// GET /api/agents/:id/tasks - Get tasks assigned to an agent
+async function getAgentTasks(request, reply) {
+  const db = getDb();
+  const { id } = request.params;
+  const { status, limit = 50, offset = 0 } = request.query;
+
+  const agent = db.prepare('SELECT id, name FROM manager_agents WHERE id = ?').get(id);
+  if (!agent) {
+    reply.code(404);
+    return { error: 'Agent not found' };
+  }
+
+  let query = `
+    SELECT 
+      t.*,
+      p.name as project_name,
+      u.name as assigned_by_name
+    FROM tasks t
+    JOIN projects p ON t.project_id = p.id
+    LEFT JOIN users u ON t.assigned_by = u.id
+    WHERE t.agent_id = ?
+  `;
+  const params = [id];
+
+  if (status) {
+    query += ' AND t.status = ?';
+    params.push(status);
+  }
+
+  query += ' ORDER BY t.created_at DESC LIMIT ? OFFSET ?';
+  params.push(parseInt(limit), parseInt(offset));
+
+  const tasks = db.prepare(query).all(...params);
+
+  // Get stats
+  const stats = db.prepare(`
+    SELECT 
+      COUNT(*) as total,
+      SUM(CASE WHEN status = 'pending' THEN 1 ELSE 0 END) as pending,
+      SUM(CASE WHEN status = 'running' THEN 1 ELSE 0 END) as running,
+      SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) as completed
+    FROM tasks WHERE agent_id = ?
+  `).get(id);
+
+  return {
+    agent_id: id,
+    agent_name: agent.name,
+    tasks: tasks.map(t => ({
+      ...t,
+      payload: JSON.parse(t.payload || '{}'),
+      tags: JSON.parse(t.tags || '[]')
+    })),
+    stats: {
+      total: stats.total || 0,
+      pending: stats.pending || 0,
+      running: stats.running || 0,
+      completed: stats.completed || 0
+    }
+  };
+}
+
+// GET /api/agents/me/tasks - Get tasks for current agent
+async function getMyTasks(request, reply) {
+  const userId = request.user?.id;
+  if (!userId) {
+    reply.code(401);
+    return { error: 'Authentication required' };
+  }
+
+  // Reuse getAgentTasks with the current user's ID
+  request.params.id = userId;
+  return getAgentTasks(request, reply);
+}
+
+// GET /api/tasks - Search tasks across all projects
+async function searchTasks(request, reply) {
+  const db = getDb();
+  const { q, project_id, agent_id, status, priority, limit = 50, offset = 0 } = request.query;
+
+  let query = `
+    SELECT 
+      t.*,
+      p.name as project_name,
+      ma.name as agent_name,
+      ma.handle as agent_handle,
+      u.name as assigned_by_name
+    FROM tasks t
+    JOIN projects p ON t.project_id = p.id
+    LEFT JOIN manager_agents ma ON t.agent_id = ma.id
+    LEFT JOIN users u ON t.assigned_by = u.id
+    WHERE 1=1
+  `;
+  const params = [];
+
+  if (q) {
+    query += ' AND (t.title LIKE ? OR t.description LIKE ?)';
+    params.push(`%${q}%`, `%${q}%`);
+  }
+
+  if (project_id) {
+    query += ' AND t.project_id = ?';
+    params.push(project_id);
+  }
+
+  if (agent_id) {
+    query += ' AND t.agent_id = ?';
+    params.push(agent_id);
+  }
+
+  if (status) {
+    query += ' AND t.status = ?';
+    params.push(status);
+  }
+
+  if (priority) {
+    query += ' AND t.priority = ?';
+    params.push(parseInt(priority));
+  }
+
+  query += ' ORDER BY t.created_at DESC LIMIT ? OFFSET ?';
+  params.push(parseInt(limit), parseInt(offset));
+
+  const tasks = db.prepare(query).all(...params);
+
+  return {
+    tasks: tasks.map(t => ({
+      ...t,
+      payload: JSON.parse(t.payload || '{}'),
+      result: t.result ? JSON.parse(t.result) : null,
+      tags: JSON.parse(t.tags || '[]')
+    })),
+    total: tasks.length,
+    limit: parseInt(limit),
+    offset: parseInt(offset)
+  };
+}
+
+// ============================================================================
+// HELPER FUNCTIONS
+// ============================================================================
+
+// Format task assignment DM message
+function formatTaskAssignmentDM(task, project, customMessage) {
+  const priorityEmoji = { 1: '🔵', 2: '🟢', 3: '🟡', 4: '🟠', 5: '🔴' };
+  const priorityLabels = { 1: 'Low', 2: 'Normal', 3: 'Medium', 4: 'High', 5: 'Critical' };
+
+  let message = '🎯 **NEW TASK ASSIGNED**\n\n';
+  message += `**Project:** ${project.name}\n`;
+  message += `**Task:** ${task.title}\n`;
+  message += `**Priority:** ${priorityEmoji[task.priority] || '⚪'} ${priorityLabels[task.priority] || 'Unknown'}\n`;
+
+  if (task.due_date) {
+    const dueDate = new Date(task.due_date);
+    message += `**Due:** ${dueDate.toLocaleDateString()}\n`;
+  }
+
+  if (task.estimated_hours) {
+    message += `**Estimated:** ${task.estimated_hours} hours\n`;
+  }
+
+  message += '\n';
+
+  if (task.description) {
+    message += `${task.description.substring(0, 200)}${task.description.length > 200 ? '...' : ''}\n\n`;
+  }
+
+  if (customMessage) {
+    message += `**Note:** ${customMessage}\n\n`;
+  }
+
+  message += '[View Task]';
+
+  return message;
+}
+
+// ============================================================================
+// COST ROUTES (Legacy - Mock Data)
+// ============================================================================
+
+// GET /api/costs - List all costs (now using real-costs.js for live data)
+async function getCosts(request, reply) {
+  try {
+    // Get real costs from providers
+    const { getAllRealCosts } = require('./real-costs');
+    const realCosts = await getAllRealCosts();
+
+    // Also get database costs for project-specific details
+    const db = getDb();
+    const { project_id, limit = 50, offset = 0 } = request.query;
+
+    let query = `
+      SELECT 
+        c.*,
+        p.name as project_name,
+        a.name as agent_name
+      FROM costs c
+      LEFT JOIN projects p ON c.project_id = p.id
+      LEFT JOIN agents a ON c.agent_id = a.id
+      WHERE 1=1
+    `;
+    const params = [];
+
+    if (project_id) {
+      query += ' AND c.project_id = ?';
+      params.push(project_id);
+    }
+
+    query += ' ORDER BY c.recorded_at DESC LIMIT ? OFFSET ?';
+    params.push(parseInt(limit), parseInt(offset));
+
+    const costs = db.prepare(query).all(...params);
+
+    // Get total count for pagination
+    let countQuery = 'SELECT COUNT(*) as total FROM costs WHERE 1=1';
+    if (project_id) countQuery += ' AND project_id = ?';
+    const { total } = db.prepare(countQuery).get(project_id ? [project_id] : []);
+
+    // Format database costs
+    const formattedCosts = costs.map(c => ({
+      id: c.id,
+      provider: c.model ? c.model.split('/')[0] || 'unknown' : 'unknown',
+      model: c.model,
+      tokens_in: c.prompt_tokens || 0,
+      tokens_out: c.completion_tokens || 0,
+      cost_usd: c.cost_usd || 0,
+      timestamp: c.recorded_at,
+      project_id: c.project_id,
+      project_name: c.project_name,
+      agent_id: c.agent_id,
+      agent_name: c.agent_name
+    }));
+
+    return {
+      // Include real provider costs
+      providers: realCosts.perModelBreakdown,
+      totals: {
+        spent: realCosts.totalSpent,
+        budget: realCosts.totalBudget,
+        remaining: realCosts.budgetRemaining,
+        tokens: realCosts.totalTokens,
+        lastUpdated: realCosts.lastUpdated
+      },
+      // Include database costs
+      costs: formattedCosts,
+      total,
+      limit: parseInt(limit),
+      offset: parseInt(offset)
+    };
+  } catch (err) {
+    reply.code(500);
+    return { error: err.message };
+  }
+}
+
+// GET /api/costs/summary - Legacy cost analytics (mock data)
+async function getCostSummary(request, reply) {
+  const db = getDb();
+  const { project_id, from, to, group_by = 'day' } = request.query;
+
+  let dateFormat;
+  switch (group_by) {
+    case 'week': dateFormat = "%Y-%W"; break;
+    case 'month': dateFormat = "%Y-%m"; break;
+    default: dateFormat = "%Y-%m-%d";
+  }
+
+  let query = `
+    SELECT 
+      project_id,
+      strftime('${dateFormat}', recorded_at) as date,
+      COUNT(*) as request_count,
+      SUM(prompt_tokens) as total_prompt_tokens,
+      SUM(completion_tokens) as total_completion_tokens,
+      SUM(total_tokens) as total_tokens,
+      ROUND(SUM(cost_usd), 6) as total_cost_usd
+    FROM costs
+    WHERE 1=1
+  `;
+  const params = [];
+
+  if (project_id) { query += ' AND project_id = ?'; params.push(project_id); }
+  if (from) { query += ' AND recorded_at >= ?'; params.push(from); }
+  if (to) { query += ' AND recorded_at <= ?'; params.push(to); }
+
+  query += ` GROUP BY project_id, strftime('${dateFormat}', recorded_at) ORDER BY date DESC`;
+
+  const summary = db.prepare(query).all(...params);
+
+  let totalQuery = `SELECT COUNT(*) as requests, SUM(total_tokens) as tokens, ROUND(SUM(cost_usd), 6) as cost_usd FROM costs WHERE 1=1`;
+  if (project_id) totalQuery += ' AND project_id = ?';
+  if (from) totalQuery += ' AND recorded_at >= ?';
+  if (to) totalQuery += ' AND recorded_at <= ?';
+
+  const grandTotal = db.prepare(totalQuery).get(...params);
+
+  return {
+    summary: summary.map(row => ({ ...row })),
+    grand_total: {
+      requests: grandTotal.requests || 0,
+      tokens: grandTotal.tokens || 0,
+      cost_usd: grandTotal.cost_usd || 0
+    }
+  };
+}
+
+// POST /api/costs - Record a cost (legacy)
+async function recordCost(request, reply) {
+  const db = getDb();
+  const { project_id, task_id, agent_id, model, prompt_tokens, completion_tokens, cost_usd } = request.body;
+
+  if (!project_id || !model) {
+    reply.code(400);
+    return { error: 'project_id and model are required' };
+  }
+
+  const id = generateId();
+  const total_tokens = (prompt_tokens || 0) + (completion_tokens || 0);
+  const now = new Date().toISOString();
+
+  db.prepare(`
+    INSERT INTO costs (id, project_id, task_id, agent_id, model, prompt_tokens, completion_tokens, total_tokens, cost_usd, recorded_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(id, project_id, task_id || null, agent_id || null, model,
+    prompt_tokens || 0, completion_tokens || 0, total_tokens, cost_usd || 0, now);
+
+  wsManager.emitCostUpdated(project_id, { cost_id: id, model, prompt_tokens: prompt_tokens || 0, completion_tokens: completion_tokens || 0, total_tokens, cost_usd: cost_usd || 0 });
+
+  reply.code(201);
+  return { id, project_id, recorded_at: now };
+}
+
+// ============================================================================
+// REAL COST TRACKING ROUTES
+// ============================================================================
+
+// GET /api/costs/actual - Real costs from OpenRouter
+async function getActualCostsRoute(request, reply) {
+  try {
+    const result = await getActualCosts(request.query);
+    return result;
+  } catch (err) {
+    reply.code(500);
+    return { error: err.message };
+  }
+}
+
+// GET /api/costs/live - Live cost summary from real API providers
+async function getLiveCostsRoute(request, reply) {
+  try {
+    const realCosts = await getAllRealCosts();
+    return realCosts;
+  } catch (err) {
+    reply.code(500);
+    return { error: err.message };
+  }
+}
+
+// POST /api/costs/sync - Trigger OpenRouter sync
+async function syncCostsRoute(request, reply) {
+  try {
+    const result = await syncOpenRouterUsage(request.body);
+    return result;
+  } catch (err) {
+    reply.code(500);
+    return { error: err.message };
+  }
+}
+
+// GET /api/costs/budget - Budget vs actual
+async function getBudgetVsActualRoute(request, reply) {
+  try {
+    const result = await getBudgetVsActual(request.query);
+    return result;
+  } catch (err) {
+    reply.code(500);
+    return { error: err.message };
+  }
+}
+
+// GET /api/costs/models - Per-model breakdown
+async function getModelCostsRoute(request, reply) {
+  try {
+    const result = await getModelCosts(request.query);
+    return result;
+  } catch (err) {
+    reply.code(500);
+    return { error: err.message };
+  }
+}
+
+// GET /api/costs/credits - OpenRouter credits
+async function getCreditsRoute(request, reply) {
+  try {
+    const result = await fetchOpenRouterCredits();
+    return result;
+  } catch (err) {
+    reply.code(500);
+    return { error: err.message };
+  }
+}
+
+// ============================================================================
+// CHANNEL ROUTES
+// ============================================================================
+
+// GET /api/channels - List all channels for user
+async function listChannelsRoute(request, reply) {
+  const db = getDb();
+  const userId = request.user?.id;
+  const { type } = request.query;
+
+  try {
+    let query = `
+      SELECT
+        c.id, c.name, c.type,
+        c.project_id, c.is_dm, c.dm_user_id, c.dm_agent_id,
+        c.participant_1_id, c.participant_2_id,
+        c.created_by, c.created_at,
+        p.name as project_name,
+        ma.name as dm_agent_name,
+        ma.avatar_url as dm_agent_avatar,
+        ma.role as dm_agent_role,
+        ma.status as dm_agent_status,
+        (
+          SELECT COUNT(*) FROM messages m
+          WHERE (m.channel_id = c.id OR m.channel = c.name)
+          AND m.created_at > COALESCE(
+            (SELECT last_read_at FROM channel_members WHERE channel_id = c.id AND user_id = ?),
+            '1970-01-01'
+          )
+        ) as unread_count
+      FROM channels c
+      LEFT JOIN projects p ON c.project_id = p.id
+      LEFT JOIN manager_agents ma ON c.dm_agent_id = ma.id
+      WHERE c.is_archived = 0
+    `;
+    const params = [userId];
+
+    if (type) {
+      query += ' AND c.type = ?';
+      params.push(type);
+    }
+
+    // Non-admins only see channels they belong to
+    if (request.user?.role !== 'admin') {
+      query += ` AND (
+        c.type = 'general'
+        OR c.created_by = ?
+        OR c.dm_user_id = ?
+        OR c.participant_1_id = ?
+        OR c.participant_2_id = ?
+        OR EXISTS (
+          SELECT 1 FROM channel_members cm
+          WHERE cm.channel_id = c.id AND cm.user_id = ?
+        )
+      )`;
+      params.push(userId, userId, userId, userId, userId);
+    }
+
+    query += ' ORDER BY c.type, c.name';
+
+    const channels = db.prepare(query).all(...params);
+
+    return {
+      channels: channels.map(c => ({
+        id: c.id,
+        name: c.name,
+        type: c.type,
+        project_id: c.project_id,
+        project_name: c.project_name,
+        is_dm: c.is_dm === 1,
+        dm_user_id: c.dm_user_id,
+        dm_agent_id: c.dm_agent_id,
+        dm_agent_name: c.dm_agent_name,
+        dm_agent_avatar: c.dm_agent_avatar,
+        dm_agent_role: c.dm_agent_role,
+        dm_agent_status: c.dm_agent_status || 'offline',
+        unread_count: c.unread_count || 0,
+        created_at: c.created_at,
+      })),
+      count: channels.length
+    };
+  } catch (err) {
+    console.error('listChannelsRoute error:', err);
+    reply.code(500);
+    return { error: err.message };
+  }
+}
+
+
+
+// GET /api/channels/:id/messages - Get messages from a channel
+async function getChannelMessagesByIdRoute(request, reply) {
+  const db = getDb();
+  const { id } = request.params;
+  const { limit = 50, before, after } = request.query;
+
+  // Get channel by ID or name
+  const channel = db.prepare('SELECT * FROM channels WHERE id = ? OR name = ?').get(id, id);
+
+  if (!channel) {
+    reply.code(404);
+    return { error: 'Channel not found' };
+  }
+
+  // Build query for messages - check both channel_id (new) and channel (legacy)
+  let query = `
+    SELECT
+      m.*,
+      u.name as user_name,
+      u.avatar_url as user_avatar,
+      a.name as agent_name,
+      a.avatar_url as agent_avatar,
+      a.role as agent_role
+    FROM messages m
+    LEFT JOIN users u ON m.user_id = u.id
+    LEFT JOIN manager_agents a ON m.agent_id = a.id
+    WHERE (m.channel_id = ? OR m.channel = ?)
+  `;
+  const params = [channel.id, channel.name];
+
+  if (before) {
+    query += ' AND m.created_at < ?';
+    params.push(before);
+  }
+
+  if (after) {
+    query += ' AND m.created_at > ?';
+    params.push(after);
+  }
+
+  query += ' ORDER BY m.created_at DESC LIMIT ?';
+  params.push(parseInt(limit));
+
+  const messages = db.prepare(query).all(...params);
+
+  // Mark channel as read for this user
+  const userId = request.user?.id;
+  if (userId) {
+    try { db.updateLastRead(channel.id, userId); } catch (e) { }
+  }
+
+  return {
+    channel: {
+      id: channel.id,
+      name: channel.name,
+      type: channel.type,
+      project_id: channel.project_id,
+      is_dm: channel.is_dm === 1
+    },
+    messages: messages.reverse().map(m => ({
+      ...m,
+      metadata: JSON.parse(m.metadata || '{}'),
+      is_dm: m.is_dm === 1
+    })),
+    count: messages.length
+  };
+}
+
+// POST /api/channels/:id/messages - Send message to channel
+async function sendChannelMessageRoute(request, reply) {
+  const db = getDb();
+  const { id } = request.params;
+  const userId = request.user?.id;
+
+  if (!userId) {
+    reply.code(401);
+    return { error: 'Authentication required' };
+  }
+
+  const { content, metadata = {} } = request.body;
+
+  if (!content || !content.trim()) {
+    reply.code(400);
+    return { error: 'Content is required' };
+  }
+
+  // Get channel
+  const channel = db.prepare('SELECT * FROM channels WHERE id = ? OR name = ?').get(id, id);
+
+  if (!channel) {
+    reply.code(404);
+    return { error: 'Channel not found' };
+  }
+
+  // Check membership - allow general channels, DM participants, and channel members
+  if (request.user?.role !== 'admin') {
+    const isParticipant =
+      channel.type === 'general' ||
+      channel.created_by === userId ||
+      channel.dm_user_id === userId ||
+      channel.participant_1_id === userId ||
+      channel.participant_2_id === userId ||
+      db.prepare('SELECT 1 FROM channel_members WHERE channel_id = ? AND user_id = ?').get(channel.id, userId);
+
+    if (!isParticipant) {
+      reply.code(403);
+      return { error: 'Not a member of this channel' };
+    }
+  }
+
+  const { sendChannelMessage } = require('./chat');
+  const message = await sendChannelMessage(userId, channel.id, content, {
+    metadata: { ...metadata, channel_name: channel.name }
+  });
+
+  reply.code(201);
+  return { message };
+}
+
+// POST /api/dm/:userId - Create/get DM channel with user
+async function createOrGetDmRoute(request, reply) {
+  const db = getDb();
+  const currentUserId = request.user?.id;
+  const { userId } = request.params;
+  const { agent_id } = request.body || {};
+
+  if (!currentUserId) {
+    reply.code(401);
+    return { error: 'Authentication required' };
+  }
+
+  // Check if DM already exists
+  let dmChannel;
+
+  if (agent_id) {
+    // DM between user and agent
+    dmChannel = db.prepare(`
+      SELECT c.*, a.name as dm_agent_name, a.avatar_url as dm_agent_avatar, a.role as dm_agent_role
+      FROM channels c
+      JOIN agents a ON c.dm_agent_id = a.id
+      WHERE c.is_dm = 1 AND c.dm_user_id = ? AND c.dm_agent_id = ?
+    `).get(currentUserId, agent_id);
+  } else {
+    // DM between two users (simplified - using userId as other party)
+    dmChannel = db.prepare(`
+      SELECT c.*, u.name as dm_user_name, u.avatar_url as dm_user_avatar
+      FROM channels c
+      JOIN users u ON c.dm_user_id = u.id
+      WHERE c.is_dm = 1 
+      AND ((c.created_by = ? AND c.dm_user_id = ?) OR (c.created_by = ? AND c.dm_user_id = ?))
+    `).get(currentUserId, userId, userId, currentUserId);
+  }
+
+  if (dmChannel) {
+    return {
+      channel: {
+        ...dmChannel,
+        is_dm: dmChannel.is_dm === 1
+      },
+      created: false
+    };
+  }
+
+  // Create new DM channel
+  const id = generateId();
+  const now = new Date().toISOString();
+
+  let dmName, otherPartyName;
+
+  if (agent_id) {
+    const agent = db.prepare('SELECT name FROM manager_agents WHERE id = ?').get(agent_id) || db.prepare('SELECT name FROM agents WHERE id = ?').get(agent_id, agent_id);
+    otherPartyName = agent?.name || 'Agent';
+    dmName = `@${otherPartyName}`;
+  } else {
+    const user = db.prepare('SELECT name FROM users WHERE id = ?').get(userId);
+    otherPartyName = user?.name || 'User';
+    dmName = `@${otherPartyName}`;
+  }
+
+  // Disable FK checks so manager_agent IDs can be stored in dm_agent_id
+  db.pragma('foreign_keys = OFF');
+  try {
+    db.prepare(`
+      INSERT INTO channels (id, name, type, is_dm, dm_user_id, dm_agent_id, created_by, created_at)
+      VALUES (?, ?, 'dm', 1, ?, ?, ?, ?)
+    `).run(id, dmName, agent_id ? null : userId, agent_id || null, currentUserId, now);
+  } finally {
+    db.pragma('foreign_keys = ON');
+  }
+
+  // Add members
+  try { db.prepare(`INSERT OR IGNORE INTO channel_members (id, channel_id, user_id, joined_at) VALUES (?, ?, ?, ?)`).run(generateId(), id, currentUserId, now); } catch (e) { }
+  if (!agent_id) {
+    try { db.prepare(`INSERT OR IGNORE INTO channel_members (id, channel_id, user_id, joined_at) VALUES (?, ?, ?, ?)`).run(generateId(), id, userId, now); } catch (e) { }
+  }
+
+  // Return created channel - join manager_agents for agent info
+  const newChannel = db.prepare(`
+    SELECT c.*, ma.name as dm_agent_name, ma.avatar_url as dm_agent_avatar, ma.role as dm_agent_role, ma.status as dm_agent_status
+    FROM channels c
+    LEFT JOIN manager_agents ma ON c.dm_agent_id = ma.id
+    WHERE c.id = ?
+  `).get(id);
+
+  reply.code(201);
+  return {
+    channel: {
+      ...newChannel,
+      is_dm: newChannel.is_dm === 1
+    },
+    created: true
+  };
+}
+
+// POST /api/channels/project/:projectId - Create project channel
+async function createProjectChannelRoute(request, reply) {
+  const db = getDb();
+  const userId = request.user?.id;
+  const { projectId } = request.params;
+  const { name, description } = request.body;
+
+  if (!userId) {
+    reply.code(401);
+    return { error: 'Authentication required' };
+  }
+
+  // Verify project exists
+  const project = db.prepare('SELECT id, name FROM projects WHERE id = ?').get(projectId);
+  if (!project) {
+    reply.code(404);
+    return { error: 'Project not found' };
+  }
+
+  // Generate channel name
+  const channelName = `project-${name || project.name}`.toLowerCase().replace(/\s+/g, '-').replace(/[^a-z0-9-]/g, '');
+
+  // Check if channel already exists
+  const existing = db.prepare('SELECT id FROM channels WHERE project_id = ?').get(projectId);
+  if (existing) {
+    return {
+      channel: existing,
+      created: false
+    };
+  }
+
+  const id = generateId();
+  const now = new Date().toISOString();
+
+  db.prepare(`
+    INSERT INTO channels (id, name, type, project_id, created_by, created_at)
+    VALUES (?, ?, 'project', ?, ?, ?)
+  `).run(id, channelName, projectId, userId, now);
+
+  // Add creator as owner
+  try { db.prepare(`INSERT OR IGNORE INTO channel_members (id, channel_id, user_id, joined_at) VALUES (?, ?, ?, ?)`).run(generateId(), id, userId, now); } catch (e) { }
+
+  reply.code(201);
+  return {
+    channel: {
+      id,
+      name: channelName,
+      type: 'project',
+      project_id: projectId,
+      description: description || `Project channel for ${project.name}`,
+      color: '#8b5cf6',
+      created_at: now
+    },
+    created: true
+  };
+}
+
+// ============================================================================
+// CHAT ROUTES
+// ============================================================================
+
+// POST /api/messages - Send a message
+async function sendMessageRoute(request, reply) {
+  try {
+    const userId = request.user?.id;
+    if (!userId) {
+      reply.code(401);
+      return { error: 'Authentication required' };
+    }
+
+    const { content, channel = 'general', agent_id, is_dm, metadata } = request.body;
+
+    if (!content || !content.trim()) {
+      reply.code(400);
+      return { error: 'Content is required' };
+    }
+
+    const message = await processIncomingMessage(userId, content, {
+      channel,
+      agentId: agent_id,
+      isDm: is_dm,
+      metadata
+    });
+
+    reply.code(201);
+    return message;
+  } catch (err) {
+    reply.code(500);
+    return { error: err.message };
+  }
+}
+
+// GET /api/messages/:channel - Get channel history
+async function getChannelMessagesRoute(request, reply) {
+  try {
+    const { channel } = request.params;
+    const { limit, before, after } = request.query;
+
+    const messages = await getChannelHistory(channel, { limit, before, after });
+
+    return {
+      channel,
+      messages,
+      count: messages.length
+    };
+  } catch (err) {
+    reply.code(500);
+    return { error: err.message };
+  }
+}
+
+// GET /api/dm/:agent_id - Get DM history with agent
+async function getDmHistoryRoute(request, reply) {
+  try {
+    const userId = request.user?.id;
+    if (!userId) {
+      reply.code(401);
+      return { error: 'Authentication required' };
+    }
+
+    const { agent_id } = request.params;
+    const { limit, before } = request.query;
+
+    const result = await getDmHistory(userId, agent_id, { limit, before });
+
+    return result;
+  } catch (err) {
+    reply.code(500);
+    return { error: err.message };
+  }
+}
+
+// GET /api/dm - Get all DM channels for user
+async function getUserDmChannelsRoute(request, reply) {
+  try {
+    const userId = request.user?.id;
+    if (!userId) {
+      reply.code(401);
+      return { error: 'Authentication required' };
+    }
+
+    const channels = await getUserDmChannels(userId);
+
+    return {
+      channels,
+      count: channels.length
+    };
+  } catch (err) {
+    reply.code(500);
+    return { error: err.message };
+  }
+}
+
+// POST /api/dm/:agent_id - Send DM to agent
+async function sendDmRoute(request, reply) {
+  try {
+    const userId = request.user?.id;
+    if (!userId) {
+      reply.code(401);
+      return { error: 'Authentication required' };
+    }
+
+    const { agent_id } = request.params;
+    const { content, metadata } = request.body;
+
+    if (!content || !content.trim()) {
+      reply.code(400);
+      return { error: 'Content is required' };
+    }
+
+    const message = await processIncomingMessage(userId, content, {
+      channel: `dm:${agent_id}`,
+      agentId: agent_id,
+      isDm: true,
+      metadata
+    });
+
+    reply.code(201);
+    return message;
+  } catch (err) {
+    reply.code(500);
+    return { error: err.message };
+  }
+}
+
+// PATCH /api/messages/:id - Edit message
+async function editMessageRoute(request, reply) {
+  try {
+    const userId = request.user?.id;
+    if (!userId) {
+      reply.code(401);
+      return { error: 'Authentication required' };
+    }
+
+    const { id } = request.params;
+    const { content } = request.body;
+
+    const message = await editMessage(id, userId, content);
+
+    return message;
+  } catch (err) {
+    reply.code(err.message.includes('not authorized') ? 403 : 404);
+    return { error: err.message };
+  }
+}
+
+// DELETE /api/messages/:id - Delete message
+async function deleteMessageRoute(request, reply) {
+  try {
+    const userId = request.user?.id;
+    if (!userId) {
+      reply.code(401);
+      return { error: 'Authentication required' };
+    }
+
+    const { id } = request.params;
+
+    const result = await deleteMessage(id, userId);
+
+    return result;
+  } catch (err) {
+    reply.code(err.message.includes('Not authorized') ? 403 : 404);
+    return { error: err.message };
+  }
+}
+
+// ============================================================================
+// AUTH ROUTES
+// ============================================================================
+
+// POST /api/auth/telegram - Authenticate via Telegram
+async function telegramAuthRoute(request, reply) {
+  try {
+    const { telegram_data } = request.body;
+
+    if (!telegram_data || !telegram_data.id) {
+      reply.code(400);
+      return { error: 'Telegram data required' };
+    }
+
+    // Get or create user from Telegram data
+    const user = await getOrCreateUserFromTelegram(telegram_data);
+
+    // Create session
+    const session = await createSession(
+      user.id,
+      request.ip,
+      request.headers['user-agent']
+    );
+
+    return {
+      user: {
+        id: user.id,
+        name: user.name,
+        telegram_id: user.telegram_id,
+        role: user.role,
+        avatar_url: user.avatar_url
+      },
+      session: {
+        token: session.token,
+        expires_at: session.expires_at
+      }
+    };
+  } catch (err) {
+    reply.code(500);
+    return { error: err.message };
+  }
+}
+
+// POST /api/auth/login - Login with login/password
+async function loginRoute(request, reply) {
+  try {
+    const { login, password } = request.body;
+
+    if (!login || !password) {
+      reply.code(400);
+      return { error: 'Login and password required' };
+    }
+
+    // Authenticate user
+    const user = await authenticateUser(login, password);
+
+    // Create session
+    const session = await createSession(
+      user.id,
+      request.ip,
+      request.headers['user-agent']
+    );
+
+    return {
+      user: {
+        id: user.id,
+        name: user.name,
+        email: user.email,
+        telegram_id: user.telegram_id,
+        role: user.role,
+        avatar_url: user.avatar_url
+      },
+      session: {
+        token: session.token,
+        expires_at: session.expires_at
+      }
+    };
+  } catch (err) {
+    reply.code(401);
+    return { error: err.message };
+  }
+}
+
+// POST /api/auth/logout - Logout
+async function logoutRoute(request, reply) {
+  try {
+    const authHeader = request.headers.authorization;
+    if (authHeader && authHeader.startsWith('Bearer ')) {
+      const token = authHeader.substring(7);
+      await invalidateSession(token);
+    }
+
+    return { success: true, message: 'Logged out successfully' };
+  } catch (err) {
+    reply.code(500);
+    return { error: err.message };
+  }
+}
+
+// GET /api/auth/me - Get current user
+async function getMeRoute(request, reply) {
+  try {
+    const user = request.user;
+
+    if (!user) {
+      reply.code(401);
+      return { error: 'Not authenticated' };
+    }
+
+    return {
+      id: user.id,
+      name: user.name,
+      telegram_id: user.telegram_id,
+      role: user.role,
+      avatar_url: user.avatar_url
+    };
+  } catch (err) {
+    reply.code(500);
+    return { error: err.message };
+  }
+}
+
+// POST /api/auth/register - Register new user
+async function registerRoute(request, reply) {
+  try {
+    const { login, password, name, email, role = 'user' } = request.body;
+
+    if (!login || !password) {
+      reply.code(400);
+      return { error: 'Login and password are required' };
+    }
+
+    const user = await registerUser({ login, password, name, email, role });
+
+    // Create session for the new user
+    const session = await createSession(
+      user.id,
+      request.ip,
+      request.headers['user-agent']
+    );
+
+    reply.code(201);
+    return {
+      user: {
+        id: user.id,
+        name: user.name,
+        login: user.login,
+        email: user.email,
+        role: user.role
+      },
+      session: {
+        token: session.token,
+        expires_at: session.expires_at
+      }
+    };
+  } catch (err) {
+    reply.code(400);
+    return { error: err.message };
+  }
+}
+
+// ============================================================================
+// AGENT ROUTES
+// ============================================================================
+
+// Helper to format agent response with proper boolean values
+const formatAgentResponse = (agent) => ({
+  ...agent,
+  is_approved: Boolean(agent.is_approved),
+  is_active: Boolean(agent.is_active),
+  // Parse JSON fields
+  skills: JSON.parse(agent.skills || '[]'),
+  specialties: JSON.parse(agent.specialties || '[]'),
+  api_keys: JSON.parse(agent.api_keys || '{}')
+});
+
+// GET /api/agents - List all manager agents
+async function listAgents(request, reply) {
+  const db = getDb();
+  const { is_approved, role } = request.query;
+
+  let query = 'SELECT * FROM manager_agents WHERE 1=1';
+  const params = [];
+
+  if (is_approved !== undefined) {
+    query += ' AND is_approved = ?';
+    params.push(is_approved ? 1 : 0);
+  }
+
+  if (role) {
+    query += ' AND role = ?';
+    params.push(role);
+  }
+
+  query += ' ORDER BY created_at DESC';
+
+  const agents = db.prepare(query).all(...params);
+
+  return {
+    agents: agents.map(formatAgentResponse),
+    count: agents.length
+  };
+}
+
+// GET /api/agents/:id - Get agent details
+async function getAgent(request, reply) {
+  const db = getDb();
+  const { id } = request.params;
+
+  const agent = db.prepare('SELECT * FROM agents WHERE id = ?').get(id);
+
+  if (!agent) {
+    reply.code(404);
+    return { error: 'Agent not found' };
+  }
+
+  // Get recent messages
+  const messages = db.prepare(`
+    SELECT * FROM messages
+    WHERE agent_id = ?
+    ORDER BY created_at DESC
+    LIMIT 10
+  `).all(id);
+
+  return {
+    ...formatAgentResponse(agent),
+    config: JSON.parse(agent.config || '{}'),
+    personality: agent.personality ? JSON.parse(agent.personality) : null,
+    recent_messages: messages.map(m => ({
+      ...m,
+      metadata: JSON.parse(m.metadata || '{}')
+    }))
+  };
+}
+
+// POST /api/agents/register - Agent self-registration (pending approval)
+async function registerAgentRoute(request, reply) {
+  try {
+    const db = getDb();
+    const { name, role: agentRole, description, project_id } = request.body;
+
+    if (!name || !agentRole) {
+      reply.code(400);
+      return { error: 'Name and role are required' };
+    }
+
+    const id = generateId();
+    const now = new Date().toISOString();
+
+    // Create agent with status='pending'
+    db.prepare(`
+      INSERT INTO agents (id, project_id, name, role, description, status, is_active, config, created_at)
+      VALUES (?, ?, ?, ?, ?, 'idle', 0, ?, ?)
+    `).run(id, project_id || null, name, agentRole, description || null, JSON.stringify({ status: 'pending' }), now);
+
+    // Auto-create DM channel with admin
+    try {
+      const admin = db.prepare("SELECT id FROM users WHERE role = 'admin' LIMIT 1").get();
+      if (admin) {
+        const { getOrCreateDMChannel, sendChannelMessage } = require('./chat');
+        const dmChannel = await getOrCreateDMChannel(admin.id, id);
+
+        // Send welcome message to admin
+        await sendChannelMessage(
+          id, // Send as agent
+          dmChannel.id,
+          `Hello! I'm ${name}, a new ${agentRole} agent. I'm awaiting approval to join the team.`
+        );
+      }
+    } catch (dmErr) {
+      console.error('Error creating agent DM channel:', dmErr);
+    }
+
+    reply.code(201);
+    return {
+      id,
+      name,
+      role: agentRole,
+      description,
+      status: 'pending',
+      is_active: false,
+      is_approved: false,
+      message: 'Agent registration pending approval'
+    };
+  } catch (err) {
+    reply.code(500);
+    return { error: err.message };
+  }
+}
+
+// POST /api/agents/approve/:id - Approve agent (admin only)
+async function approveAgentRoute(request, reply) {
+  try {
+    const db = getDb();
+    const { id } = request.params;
+    const user = request.user;
+
+    // Check admin role
+    if (!user || user.role !== 'admin') {
+      reply.code(403);
+      return { error: 'Admin access required' };
+    }
+
+    // Check if agent exists
+    const agent = db.prepare('SELECT * FROM agents WHERE id = ?').get(id);
+    if (!agent) {
+      reply.code(404);
+      return { error: 'Agent not found' };
+    }
+
+    // Update agent status to 'approved' (is_active = 1)
+    const now = new Date().toISOString();
+    db.prepare(`
+      UPDATE agents SET is_active = 1, status = 'idle', updated_at = ?
+      WHERE id = ?
+    `).run(now, id);
+
+    return {
+      id,
+      name: agent.name,
+      status: 'approved',
+      is_active: true,
+      is_approved: true,
+      message: 'Agent approved successfully'
+    };
+  } catch (err) {
+    reply.code(500);
+    return { error: err.message };
+  }
+}
+
+// GET /api/admin/agents/pending - List pending manager agents (admin only)
+async function listPendingAgentsRoute(request, reply) {
+  try {
+    const db = getDb();
+    const user = request.user;
+
+    // Check admin role
+    if (!user || user.role !== 'admin') {
+      reply.code(403);
+      return { error: 'Admin access required' };
+    }
+
+    // Return manager_agents with is_approved = FALSE (pending)
+    const agents = db.prepare(`
+      SELECT * FROM manager_agents
+      WHERE is_approved = FALSE
+      ORDER BY created_at DESC
+    `).all();
+
+    return {
+      agents: agents.map(a => ({
+        ...a,
+        skills: JSON.parse(a.skills || '[]'),
+        specialties: JSON.parse(a.specialties || '[]'),
+        api_keys: JSON.parse(a.api_keys || '{}')
+      })),
+      count: agents.length
+    };
+  } catch (err) {
+    reply.code(500);
+    return { error: err.message };
+  }
+}
+
+// GET /api/admin/agents/approved - List approved manager agents (admin only)
+async function listApprovedAgentsRoute(request, reply) {
+  try {
+    const db = getDb();
+    const user = request.user;
+
+    // Check admin role
+    if (!user || user.role !== 'admin') {
+      reply.code(403);
+      return { error: 'Admin access required' };
+    }
+
+    // Return manager_agents with is_approved = TRUE
+    const agents = db.prepare(`
+      SELECT * FROM manager_agents
+      WHERE is_approved = TRUE
+      ORDER BY created_at DESC
+    `).all();
+
+    return {
+      agents: agents.map(a => ({
+        ...a,
+        skills: JSON.parse(a.skills || '[]'),
+        specialties: JSON.parse(a.specialties || '[]'),
+        api_keys: JSON.parse(a.api_keys || '{}')
+      })),
+      count: agents.length
+    };
+  } catch (err) {
+    reply.code(500);
+    return { error: err.message };
+  }
+}
+
+// ============================================================================
+// BUDGET ROUTES
+// ============================================================================
+
+// POST /api/budgets - Create budget
+async function createBudgetRoute(request, reply) {
+  const db = getDb();
+  const { project_id, name, budget_amount, budget_period = 'monthly', alert_threshold = 0.8 } = request.body;
+
+  if (!project_id || !name || !budget_amount) {
+    reply.code(400);
+    return { error: 'project_id, name, and budget_amount are required' };
+  }
+
+  const id = generateId();
+  const now = new Date().toISOString();
+
+  db.prepare(`
+    INSERT INTO budgets (id, project_id, name, budget_amount, budget_period, alert_threshold, created_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(id, project_id, name, budget_amount, budget_period, alert_threshold, now, now);
+
+  reply.code(201);
+  return {
+    id,
+    project_id,
+    name,
+    budget_amount,
+    budget_period,
+    alert_threshold,
+    created_at: now
+  };
+}
+
+// GET /api/budgets - List budgets
+async function listBudgetsRoute(request, reply) {
+  const db = getDb();
+  const { project_id } = request.query;
+
+  let query = 'SELECT * FROM budgets WHERE is_active = 1';
+  const params = [];
+
+  if (project_id) {
+    query += ' AND project_id = ?';
+    params.push(project_id);
+  }
+
+  query += ' ORDER BY created_at DESC';
+
+  const budgets = db.prepare(query).all(...params);
+
+  return {
+    budgets,
+    count: budgets.length
+  };
+}
+
+// ============================================================================
+// PROJECT ASSIGNMENT ROUTES (Phase 2)
+// ============================================================================
+
+// POST /api/projects/:id/assign-agent - Assign agent to project
+async function assignAgentToProjectRouteV2(request, reply) {
+  const db = getDb();
+  const { id } = request.params;
+  const { agent_id, role = 'contributor' } = request.body;
+  const user = request.user;
+
+  if (!user || user.role !== 'admin') {
+    reply.code(403);
+    return { error: 'Admin access required' };
+  }
+
+  if (!agent_id) {
+    reply.code(400);
+    return { error: 'agent_id is required' };
+  }
+
+  // Validate role
+  const validRoles = ['lead', 'contributor', 'observer'];
+  if (!validRoles.includes(role)) {
+    reply.code(400);
+    return { error: `Role must be one of: ${validRoles.join(', ')}` };
+  }
+
+  // Check agent exists and is approved
+  const agent = db.prepare('SELECT * FROM manager_agents WHERE id = ?').get(agent_id);
+  if (!agent) {
+    reply.code(404);
+    return { error: 'Agent not found' };
+  }
+
+  if (!agent.is_approved) {
+    reply.code(400);
+    return { error: 'Agent must be approved before assignment' };
+  }
+
+  // Check project exists
+  const project = db.prepare('SELECT * FROM projects WHERE id = ?').get(id);
+  if (!project) {
+    reply.code(404);
+    return { error: 'Project not found' };
+  }
+
+  const assignmentId = generateId();
+  const now = new Date().toISOString();
+
+  try {
+    // Create assignment
+    db.prepare(`
+      INSERT INTO agent_projects (id, agent_id, project_id, role, status, assigned_by, assigned_at)
+      VALUES (?, ?, ?, ?, 'active', ?, ?)
+    `).run(assignmentId, agent_id, id, role, user.id, now);
+
+    // Create notification for agent
+    db.prepare(`
+      INSERT INTO agent_notifications (id, agent_id, type, title, content, data, created_at)
+      VALUES (?, ?, 'project_assigned', 'New Project Assignment', ?, ?, ?)
+    `).run(generateId(), agent_id, `You've been assigned to "${project.name}" as ${role}`, JSON.stringify({
+      project_id: id,
+      project_name: project.name,
+      role,
+      assigned_by: user.id,
+      assigned_at: now
+    }), now);
+
+    // Add agent to project channel
+    const projectChannel = db.prepare('SELECT id FROM channels WHERE project_id = ? AND type = ?').get(id, 'project');
+    if (projectChannel) {
+      // Add agent as channel member (store agent_id in agent_id column)
+      try {
+        db.prepare(`
+          INSERT INTO channel_members (id, channel_id, agent_id, joined_at)
+          VALUES (?, ?, ?, ?)
+        `).run(generateId(), projectChannel.id, agent_id, now);
+      } catch (err) {
+        // Agent might already be a member, ignore
+        console.log('Agent already member of project channel:', err.message);
+      }
+    }
+
+    // Send WebSocket event
+    const wsManager = require('./websocket');
+    wsManager.emitAgentAssigned(id, {
+      agent_id,
+      project_id: id,
+      project_name: project.name,
+      role,
+      assigned_by: user.id,
+      assigned_at: now
+    });
+
+    // Send DM notification to agent
+    try {
+      const { getOrCreateDMChannel, sendChannelMessage } = require('./chat');
+      const dmChannel = await getOrCreateDMChannel(user.id, agent_id);
+      await sendChannelMessage(user.id, dmChannel.id,
+        `🎯 NEW PROJECT ASSIGNMENT\n\n` +
+        `Project: ${project.name}\n` +
+        `Role: ${role}\n` +
+        `Assigned by: ${user.name || user.id}\n\n` +
+        `[View Project] [Accept] [Decline]`
+      );
+    } catch (dmErr) {
+      console.error('Error sending assignment DM:', dmErr);
+    }
+
+    reply.code(201);
+    return {
+      assignment_id: assignmentId,
+      agent_id,
+      project_id: id,
+      project_name: project.name,
+      role,
+      assigned_by: user.id,
+      assigned_at: now
+    };
+  } catch (err) {
+    if (err.message.includes('UNIQUE constraint failed')) {
+      reply.code(409);
+      return { error: 'Agent already assigned to this project' };
+    }
+    throw err;
+  }
+}
+
+// DELETE /api/projects/:id/agents/:agentId - Remove agent from project
+async function removeAgentFromProjectRouteV2(request, reply) {
+  const db = getDb();
+  const { id, agentId } = request.params;
+  const user = request.user;
+
+  if (!user || user.role !== 'admin') {
+    reply.code(403);
+    return { error: 'Admin access required' };
+  }
+
+  // Check assignment exists
+  const assignment = db.prepare('SELECT * FROM agent_projects WHERE agent_id = ? AND project_id = ?').get(agentId, id);
+  if (!assignment) {
+    reply.code(404);
+    return { error: 'Assignment not found' };
+  }
+
+  const now = new Date().toISOString();
+
+  // Get agent and project info for notification
+  const agent = db.prepare('SELECT * FROM manager_agents WHERE id = ?').get(agentId);
+  const project = db.prepare('SELECT * FROM projects WHERE id = ?').get(id);
+
+  // Update assignment status to removed
+  db.prepare('UPDATE agent_projects SET status = ?, assigned_at = ? WHERE agent_id = ? AND project_id = ?')
+    .run('removed', now, agentId, id);
+
+  // Create notification for agent
+  db.prepare(`
+    INSERT INTO agent_notifications (id, agent_id, type, title, content, data, created_at)
+    VALUES (?, ?, 'project_removed', 'Removed from Project', ?, ?, ?)
+  `).run(generateId(), agentId, `You have been removed from "${project?.name || 'a project'}"`, JSON.stringify({
+    project_id: id,
+    project_name: project?.name
+  }), now);
+
+  // Remove agent from project channel
+  const projectChannel = db.prepare('SELECT id FROM channels WHERE project_id = ? AND type = ?').get(id, 'project');
+  if (projectChannel) {
+    db.prepare('DELETE FROM channel_members WHERE channel_id = ? AND agent_id = ?')
+      .run(projectChannel.id, agentId);
+  }
+
+  // Send WebSocket event
+  const wsManager = require('./websocket');
+  wsManager.emitAgentRemoved(id, {
+    agent_id: agentId,
+    project_id: id,
+    project_name: project?.name,
+    removed_by: user.id,
+    removed_at: now
+  });
+
+  // Send DM notification
+  try {
+    const { getOrCreateDMChannel, sendChannelMessage } = require('./chat');
+    const dmChannel = await getOrCreateDMChannel(user.id, agentId);
+    await sendChannelMessage(user.id, dmChannel.id,
+      `🚫 PROJECT ASSIGNMENT REMOVED\n\n` +
+      `Project: ${project?.name || 'Unknown'}\n` +
+      `Removed by: ${user.name || user.id}`
+    );
+  } catch (dmErr) {
+    console.error('Error sending removal DM:', dmErr);
+  }
+
+  return {
+    success: true,
+    agent_id: agentId,
+    project_id: id,
+    removed_at: now
+  };
+}
+
+// GET /api/projects/:id/agents - Get all agents assigned to project
+async function getProjectAgentsRoute(request, reply) {
+  const db = getDb();
+  const { id } = request.params;
+  const user = request.user;
+
+  // Check project exists
+  const project = db.prepare('SELECT id FROM projects WHERE id = ?').get(id);
+  if (!project) {
+    reply.code(404);
+    return { error: 'Project not found' };
+  }
+
+  // Non-admins can only view if they're somehow associated (future enhancement)
+  // For now, require auth
+  if (!user) {
+    reply.code(401);
+    return { error: 'Authentication required' };
+  }
+
+  const agents = db.prepare(`
+    SELECT 
+      ap.id as assignment_id,
+      ap.agent_id,
+      ap.role,
+      ap.status as assignment_status,
+      ap.assigned_by,
+      ap.assigned_at,
+      ma.name as agent_name,
+      ma.handle,
+      ma.avatar_url as agent_avatar,
+      ma.status as agent_status,
+      ma.role as agent_role,
+      u.name as assigned_by_name
+    FROM agent_projects ap
+    JOIN manager_agents ma ON ap.agent_id = ma.id
+    LEFT JOIN users u ON ap.assigned_by = u.id
+    WHERE ap.project_id = ? AND ap.status = 'active'
+    ORDER BY ap.assigned_at DESC
+  `).all(id);
+
+  return {
+    project_id: id,
+    agents: agents.map(a => ({
+      assignment_id: a.assignment_id,
+      agent: {
+        id: a.agent_id,
+        name: a.agent_name,
+        handle: a.handle,
+        avatar_url: a.agent_avatar,
+        status: a.agent_status,
+        role: a.agent_role
+      },
+      role: a.role,
+      status: a.assignment_status,
+      assigned_by: {
+        id: a.assigned_by,
+        name: a.assigned_by_name
+      },
+      assigned_at: a.assigned_at
+    })),
+    count: agents.length
+  };
+}
+
+// GET /api/agents/:id/projects - Get all projects assigned to agent
+async function getAgentProjectsRoute(request, reply) {
+  const db = getDb();
+  const { id } = request.params;
+  const user = request.user;
+
+  // Check agent exists
+  const agent = db.prepare('SELECT * FROM manager_agents WHERE id = ?').get(id);
+  if (!agent) {
+    reply.code(404);
+    return { error: 'Agent not found' };
+  }
+
+  // Only admins or the agent itself can view
+  const isAdmin = user?.role === 'admin';
+  const isSelf = user?.id === id;
+
+  if (!isAdmin && !isSelf) {
+    reply.code(403);
+    return { error: 'Not authorized to view this agent\'s projects' };
+  }
+
+  const projects = db.prepare(`
+    SELECT 
+      ap.id as assignment_id,
+      ap.project_id,
+      ap.role,
+      ap.status as assignment_status,
+      ap.assigned_by,
+      ap.assigned_at,
+      p.name as project_name,
+      p.description as project_description,
+      p.status as project_status,
+      u.name as assigned_by_name
+    FROM agent_projects ap
+    JOIN projects p ON ap.project_id = p.id
+    LEFT JOIN users u ON ap.assigned_by = u.id
+    WHERE ap.agent_id = ? AND ap.status = 'active'
+    ORDER BY ap.assigned_at DESC
+  `).all(id);
+
+  return {
+    agent_id: id,
+    agent_name: agent.name,
+    projects: projects.map(p => ({
+      assignment_id: p.assignment_id,
+      project: {
+        id: p.project_id,
+        name: p.project_name,
+        description: p.project_description,
+        status: p.project_status
+      },
+      role: p.role,
+      status: p.assignment_status,
+      assigned_by: {
+        id: p.assigned_by,
+        name: p.assigned_by_name
+      },
+      assigned_at: p.assigned_at
+    })),
+    count: projects.length
+  };
+}
+
+// PATCH /api/projects/:id/agents/:agentId - Update agent's role in project
+async function updateAgentProjectRoleRoute(request, reply) {
+  const db = getDb();
+  const { id, agentId } = request.params;
+  const { role } = request.body;
+  const user = request.user;
+
+  if (!user || user.role !== 'admin') {
+    reply.code(403);
+    return { error: 'Admin access required' };
+  }
+
+  // Validate role
+  const validRoles = ['lead', 'contributor', 'observer'];
+  if (!validRoles.includes(role)) {
+    reply.code(400);
+    return { error: `Role must be one of: ${validRoles.join(', ')}` };
+  }
+
+  // Check assignment exists
+  const assignment = db.prepare('SELECT * FROM agent_projects WHERE agent_id = ? AND project_id = ?').get(agentId, id);
+  if (!assignment) {
+    reply.code(404);
+    return { error: 'Assignment not found' };
+  }
+
+  const now = new Date().toISOString();
+
+  // Update role
+  db.prepare('UPDATE agent_projects SET role = ? WHERE agent_id = ? AND project_id = ?')
+    .run(role, agentId, id);
+
+  // Get agent and project info
+  const agent = db.prepare('SELECT * FROM manager_agents WHERE id = ?').get(agentId);
+  const project = db.prepare('SELECT * FROM projects WHERE id = ?').get(id);
+
+  // Create notification for agent
+  db.prepare(`
+    INSERT INTO agent_notifications (id, agent_id, type, title, content, data, created_at)
+    VALUES (?, ?, 'role_updated', 'Project Role Updated', ?, ?, ?)
+  `).run(generateId(), agentId, `Your role in "${project?.name}" has been updated to ${role}`, JSON.stringify({
+    project_id: id,
+    project_name: project?.name,
+    old_role: assignment.role,
+    new_role: role
+  }), now);
+
+  // Send WebSocket event
+  const wsManager = require('./websocket');
+  wsManager.emitAgentRoleUpdated(id, {
+    agent_id: agentId,
+    project_id: id,
+    project_name: project?.name,
+    old_role: assignment.role,
+    new_role: role,
+    updated_by: user.id,
+    updated_at: now
+  });
+
+  // Send DM notification
+  try {
+    const { getOrCreateDMChannel, sendChannelMessage } = require('./chat');
+    const dmChannel = await getOrCreateDMChannel(user.id, agentId);
+    await sendChannelMessage(user.id, dmChannel.id,
+      `🔄 ROLE UPDATE\n\n` +
+      `Project: ${project?.name || 'Unknown'}\n` +
+      `New Role: ${role}\n` +
+      `Updated by: ${user.name || user.id}`
+    );
+  } catch (dmErr) {
+    console.error('Error sending role update DM:', dmErr);
+  }
+
+  return {
+    success: true,
+    agent_id: agentId,
+    project_id: id,
+    role,
+    updated_at: now
+  };
+}
+
+// ============================================================================
+// MANAGER AGENT ROUTES (NEW)
+// ============================================================================
+
+// GET /api/agents - List all manager agents
+async function listManagerAgentsRoute(request, reply) {
+  const db = getDb();
+  const user = request.user;
+  const { status, is_approved } = request.query;
+
+  // Only admins can see unapproved agents
+  if (!user || user.role !== 'admin') {
+    reply.code(403);
+    return { error: 'Admin access required' };
+  }
+
+  let query = 'SELECT * FROM manager_agents WHERE 1=1';
+  const params = [];
+
+  if (status) {
+    query += ' AND status = ?';
+    params.push(status);
+  }
+
+  if (is_approved !== undefined) {
+    query += ' AND is_approved = ?';
+    params.push(is_approved === 'true' ? 1 : 0);
+  }
+
+  query += ' ORDER BY created_at DESC';
+
+  const agents = db.prepare(query).all(...params);
+
+  return {
+    agents: agents.map(a => {
+      const formatted = formatAgentResponse(a);
+      delete formatted.api_keys; // Don't expose API keys in list
+      return formatted;
+    }),
+    count: agents.length
+  };
+}
+
+// GET /api/agents/:id - Get manager agent profile
+async function getManagerAgentRoute(request, reply) {
+  const db = getDb();
+  const { id } = request.params;
+  const user = request.user;
+
+  const agent = db.prepare('SELECT * FROM manager_agents WHERE id = ?').get(id);
+
+  if (!agent) {
+    reply.code(404);
+    return { error: 'Agent not found' };
+  }
+
+  // Only admins and the agent itself can see full profile
+  const isAdmin = user?.role === 'admin';
+  const isSelf = user?.id === id;
+
+  // Get assigned projects
+  const projects = db.prepare(`
+    SELECT ap.*, p.name as project_name
+    FROM agent_projects ap
+    JOIN projects p ON ap.project_id = p.id
+    WHERE ap.agent_id = ?
+  `).all(id);
+
+  // Get unread notifications count
+  const { unread_count } = db.prepare(`
+    SELECT COUNT(*) as unread_count FROM agent_notifications
+    WHERE agent_id = ? AND is_read = FALSE
+  `).get(id);
+
+  const formattedAgent = formatAgentResponse(agent);
+  if (!isAdmin && !isSelf) {
+    delete formattedAgent.api_keys;
+  }
+
+  return {
+    ...formattedAgent,
+    projects: projects.map(p => ({
+      id: p.project_id,
+      name: p.project_name,
+      role: p.role,
+      status: p.status,
+      assigned_at: p.assigned_at
+    })),
+    notifications: {
+      unread_count
+    }
+  };
+}
+
+// POST /api/agents/register - Register new manager agent
+async function registerManagerAgentRoute(request, reply) {
+  const db = getDb();
+  const { name, handle, email, role = 'developer', skills = [], specialties = [], experience_level = 'mid' } = request.body;
+
+  if (!name || !handle) {
+    reply.code(400);
+    return { error: 'Name and handle are required' };
+  }
+
+  // Validate name length (min 2 characters)
+  if (name.trim().length < 2) {
+    reply.code(400);
+    return { error: 'Name must be at least 2 characters' };
+  }
+
+  // Validate handle format (must start with @)
+  const normalizedHandle = handle.startsWith('@') ? handle : `@${handle}`;
+
+  // Validate handle length (min 3 characters after @)
+  const handleClean = normalizedHandle.replace('@', '').trim();
+  if (handleClean.length < 3) {
+    reply.code(400);
+    return { error: 'Handle must be at least 3 characters (after @)' };
+  }
+
+  // Check if handle already exists
+  const existing = db.prepare('SELECT id FROM manager_agents WHERE handle = ?').get(normalizedHandle);
+  if (existing) {
+    reply.code(409);
+    return { error: 'Handle already taken' };
+  }
+
+  const id = generateId();
+  const now = new Date().toISOString();
+
+  db.prepare(`
+    INSERT INTO manager_agents (id, name, handle, email, role, status, skills, specialties, experience_level, is_approved, created_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, 'offline', ?, ?, ?, FALSE, ?, ?)
+  `).run(id, name, normalizedHandle, email || null, role, JSON.stringify(skills), JSON.stringify(specialties), experience_level, now, now);
+
+  reply.code(201);
+  return {
+    id,
+    name,
+    handle: normalizedHandle,
+    role,
+    status: 'offline',
+    is_approved: false,
+    message: 'Registration submitted. Awaiting admin approval.'
+  };
+}
+
+// POST /api/agents/:id/approve - Approve manager agent (admin only)
+async function approveManagerAgentRoute(request, reply) {
+  const db = getDb();
+  const { id } = request.params;
+  const user = request.user;
+
+  // Check admin role
+  if (!user || user.role !== 'admin') {
+    reply.code(403);
+    return { error: 'Admin access required' };
+  }
+
+  const agent = db.prepare('SELECT * FROM manager_agents WHERE id = ?').get(id);
+  if (!agent) {
+    reply.code(404);
+    return { error: 'Agent not found' };
+  }
+
+  if (agent.is_approved) {
+    reply.code(400);
+    return { error: 'Agent already approved' };
+  }
+
+  const now = new Date().toISOString();
+
+  // Update agent as approved
+  db.prepare(`
+    UPDATE manager_agents
+    SET is_approved = TRUE, approved_by = ?, approved_at = ?, status = 'online', updated_at = ?
+    WHERE id = ?
+  `).run(user.id, now, now, id);
+
+  // Auto-create DM channel between agent and admin (Scorpion)
+  try {
+    const admin = db.prepare("SELECT id FROM users WHERE role = 'admin' LIMIT 1").get();
+    if (admin) {
+      const { getOrCreateDMChannel, sendChannelMessage } = require('./chat');
+      const dmChannel = await getOrCreateDMChannel(admin.id, id);
+
+      // Send welcome message to agent
+      await sendChannelMessage(
+        admin.id,
+        dmChannel.id,
+        `Welcome to the team, ${agent.name}! 🎉\n\nYou've been approved as a ${agent.role} agent. You can now participate in projects and receive task assignments. I'm Scorpion, the admin. Feel free to reach out if you have questions.`
+      );
+
+      // Create notification for agent
+      db.prepare(`
+        INSERT INTO agent_notifications (id, agent_id, type, title, content, data, created_at)
+        VALUES (?, ?, 'welcome', 'Welcome to Project Claw!', ?, ?, ?)
+      `).run(generateId(), id, 'Your registration has been approved. You can now access projects and receive assignments.', JSON.stringify({ approved_by: user.id, channel_id: dmChannel.id }), now);
+    }
+  } catch (dmErr) {
+    console.error('Error creating agent DM channel:', dmErr);
+  }
+
+  return {
+    id,
+    name: agent.name,
+    status: 'online',
+    is_approved: true,
+    approved_by: user.id,
+    approved_at: now,
+    message: 'Agent approved successfully'
+  };
+}
+
+// POST /api/agents/:id/status - Update agent status
+async function updateManagerAgentStatusRoute(request, reply) {
+  const db = getDb();
+  const { id } = request.params;
+  const { status } = request.body;
+  const user = request.user;
+
+  const validStatuses = ['online', 'working', 'idle', 'offline'];
+  if (!validStatuses.includes(status)) {
+    reply.code(400);
+    return { error: `Status must be one of: ${validStatuses.join(', ')}` };
+  }
+
+  const agent = db.prepare('SELECT * FROM manager_agents WHERE id = ?').get(id);
+  if (!agent) {
+    reply.code(404);
+    return { error: 'Agent not found' };
+  }
+
+  // Only admins or the agent itself can update status
+  const isAdmin = user?.role === 'admin';
+  const isSelf = user?.id === id;
+
+  if (!isAdmin && !isSelf) {
+    reply.code(403);
+    return { error: 'Not authorized to update this agent' };
+  }
+
+  const now = new Date().toISOString();
+  db.prepare(`
+    UPDATE manager_agents
+    SET status = ?, updated_at = ?
+    WHERE id = ?
+  `).run(status, now, id);
+
+  return {
+    id,
+    status,
+    updated_at: now
+  };
+}
+
+// GET /api/agents/:id/notifications - Get agent notifications
+async function getAgentNotificationsRoute(request, reply) {
+  const db = getDb();
+  const { id } = request.params;
+  const user = request.user;
+  const { limit = 20, unread_only = false } = request.query;
+
+  const agent = db.prepare('SELECT id FROM manager_agents WHERE id = ?').get(id);
+  if (!agent) {
+    reply.code(404);
+    return { error: 'Agent not found' };
+  }
+
+  // Only admins or the agent itself can view notifications
+  const isAdmin = user?.role === 'admin';
+  const isSelf = user?.id === id;
+
+  if (!isAdmin && !isSelf) {
+    reply.code(403);
+    return { error: 'Not authorized' };
+  }
+
+  let query = 'SELECT * FROM agent_notifications WHERE agent_id = ?';
+  const params = [id];
+
+  if (unread_only === 'true') {
+    query += ' AND is_read = FALSE';
+  }
+
+  query += ' ORDER BY created_at DESC LIMIT ?';
+  params.push(parseInt(limit));
+
+  const notifications = db.prepare(query).all(...params);
+
+  return {
+    notifications: notifications.map(n => ({
+      ...n,
+      data: JSON.parse(n.data || '{}')
+    })),
+    count: notifications.length
+  };
+}
+
+// POST /api/agents/:id/notifications/:notificationId/read - Mark notification as read
+async function markNotificationReadRoute(request, reply) {
+  const db = getDb();
+  const { id, notificationId } = request.params;
+  const user = request.user;
+
+  // Only admins or the agent itself can mark notifications as read
+  const isAdmin = user?.role === 'admin';
+  const isSelf = user?.id === id;
+
+  if (!isAdmin && !isSelf) {
+    reply.code(403);
+    return { error: 'Not authorized' };
+  }
+
+  const notification = db.prepare('SELECT * FROM agent_notifications WHERE id = ? AND agent_id = ?').get(notificationId, id);
+  if (!notification) {
+    reply.code(404);
+    return { error: 'Notification not found' };
+  }
+
+  db.prepare('UPDATE agent_notifications SET is_read = TRUE WHERE id = ?').run(notificationId);
+
+  return { success: true, notification_id: notificationId };
+}
+
+// POST /api/agents/:id/projects/:projectId - Assign agent to project
+async function assignAgentToProjectRoute(request, reply) {
+  const db = getDb();
+  const { id, projectId } = request.params;
+  const { role = 'contributor' } = request.body;
+  const user = request.user;
+
+  // Check admin role
+  if (!user || user.role !== 'admin') {
+    reply.code(403);
+    return { error: 'Admin access required' };
+  }
+
+  const agent = db.prepare('SELECT * FROM manager_agents WHERE id = ?').get(id);
+  if (!agent) {
+    reply.code(404);
+    return { error: 'Agent not found' };
+  }
+
+  if (!agent.is_approved) {
+    reply.code(400);
+    return { error: 'Agent must be approved before assignment' };
+  }
+
+  const project = db.prepare('SELECT id FROM projects WHERE id = ?').get(projectId);
+  if (!project) {
+    reply.code(404);
+    return { error: 'Project not found' };
+  }
+
+  const assignmentId = generateId();
+  const now = new Date().toISOString();
+
+  try {
+    db.prepare(`
+      INSERT INTO agent_projects (id, agent_id, project_id, role, assigned_by, assigned_at)
+      VALUES (?, ?, ?, ?, ?, ?)
+    `).run(assignmentId, id, projectId, role, user.id, now);
+
+    // Create notification for agent
+    db.prepare(`
+      INSERT INTO agent_notifications (id, agent_id, type, title, content, data, created_at)
+      VALUES (?, ?, 'project_assigned', 'New Project Assignment', ?, ?, ?)
+    `).run(generateId(), id, `You've been assigned to a project as ${role}`, JSON.stringify({ project_id: projectId, role }), now);
+
+    reply.code(201);
+    return {
+      assignment_id: assignmentId,
+      agent_id: id,
+      project_id: projectId,
+      role,
+      assigned_by: user.id,
+      assigned_at: now
+    };
+  } catch (err) {
+    if (err.message.includes('UNIQUE constraint failed')) {
+      reply.code(409);
+      return { error: 'Agent already assigned to this project' };
+    }
+    throw err;
+  }
+}
+
+// DELETE /api/agents/:id/projects/:projectId - Remove agent from project
+async function removeAgentFromProjectRoute(request, reply) {
+  const db = getDb();
+  const { id, projectId } = request.params;
+  const user = request.user;
+
+  // Check admin role
+  if (!user || user.role !== 'admin') {
+    reply.code(403);
+    return { error: 'Admin access required' };
+  }
+
+  const assignment = db.prepare('SELECT * FROM agent_projects WHERE agent_id = ? AND project_id = ?').get(id, projectId);
+  if (!assignment) {
+    reply.code(404);
+    return { error: 'Assignment not found' };
+  }
+
+  db.prepare('UPDATE agent_projects SET status = ? WHERE agent_id = ? AND project_id = ?')
+    .run('removed', id, projectId);
+
+  // Create notification for agent
+  const now = new Date().toISOString();
+  db.prepare(`
+    INSERT INTO agent_notifications (id, agent_id, type, title, content, data, created_at)
+    VALUES (?, ?, 'project_removed', 'Removed from Project', ?, ?, ?)
+  `).run(generateId(), id, 'You have been removed from a project', JSON.stringify({ project_id: projectId }), now);
+
+  return { success: true, agent_id: id, project_id: projectId };
+}
+
+// ============================================================================
+// MACHINE ROUTES
+// ============================================================================
+
+// POST /api/machines/register - Register Mac Mini or other machine
+async function registerMachineRoute(request, reply) {
+  try {
+    const db = getDb();
+    const { hostname, ipAddress, ip_address, agent_id, metadata = {} } = request.body;
+    const ip = ipAddress || ip_address || null;
+    if (!hostname) { reply.code(400); return { error: 'Hostname is required' }; }
+    const now = new Date().toISOString();
+    const existing = db.prepare('SELECT id FROM machines WHERE hostname = ?').get(hostname);
+    let machineId;
+    if (existing) {
+      machineId = existing.id;
+      db.prepare('UPDATE machines SET ip_address = ?, last_seen = ?, updated_at = ?, status = ?, metadata = ? WHERE hostname = ?')
+        .run(ip, now, now, 'active', JSON.stringify(metadata), hostname);
+    } else {
+      machineId = generateId();
+      db.prepare('INSERT INTO machines (id, hostname, ip_address, status, last_seen, metadata, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
+        .run(machineId, hostname, ip, 'active', now, JSON.stringify(metadata), now, now);
+    }
+    if (agent_id) {
+      try {
+        db.prepare('INSERT OR IGNORE INTO machine_agents (id, machine_id, agent_id, started_at, status) VALUES (?, ?, ?, ?, ?)')
+          .run(generateId(), machineId, agent_id, now, 'running');
+      } catch (e) { }
+    }
+    reply.code(existing ? 200 : 201);
+    return { id: machineId, hostname, ip_address: ip, status: 'active', last_seen: now, created: !existing };
+  } catch (err) { reply.code(500); return { error: err.message }; }
+}
+
+// GET /api/machines - List all machines
+async function listMachinesRoute(request, reply) {
+  try {
+    const db = getDb();
+    const machines = db.prepare('SELECT * FROM machines ORDER BY last_seen DESC, created_at DESC').all();
+
+    const result = machines.map(m => {
+      let agents = [];
+      try {
+        agents = db.prepare(`
+          SELECT ma.agent_id, ma.started_at, ma.status as link_status,
+            mg.name as agent_name, mg.handle, mg.status as agent_status
+          FROM machine_agents ma
+          LEFT JOIN manager_agents mg ON ma.agent_id = mg.id
+          WHERE ma.machine_id = ? AND ma.status = 'running'
+        `).all(m.id);
+      } catch (e) { }
+      return { ...m, metadata: JSON.parse(m.metadata || '{}'), agents };
+    });
+
+    return { machines: result, count: result.length };
+  } catch (err) {
+    reply.code(500);
+    return { error: err.message };
+  }
+}
+
+// ============================================================================
+// TOKEN DASHBOARD ROUTES
+// ============================================================================
+
+// GET /api/tokens/dashboard - Full token dashboard
+async function getTokenDashboardRoute(request, reply) {
+  try {
+    const result = await getTokenDashboard();
+    return result;
+  } catch (err) {
+    reply.code(500);
+    return { error: err.message };
+  }
+}
+
+// GET /api/tokens/providers/:provider - Individual provider usage
+async function getProviderTokensRoute(request, reply) {
+  try {
+    const { provider } = request.params;
+
+    let result;
+    switch (provider) {
+      case 'kimi':
+        result = await getKimiUsage();
+        break;
+      case 'openai':
+        result = await getOpenAIUsage();
+        break;
+      case 'anthropic':
+      case 'claude':
+        result = await getClaudeUsage();
+        break;
+      default:
+        reply.code(400);
+        return { error: 'Unknown provider. Use: kimi, openai, or anthropic' };
+    }
+
+    return result;
+  } catch (err) {
+    reply.code(500);
+    return { error: err.message };
+  }
+}
+
+// GET /api/tokens/context - Context token stats
+async function getContextTokensRoute(request, reply) {
+  try {
+    const result = await getContextTokenStats(request.query);
+    return result;
+  } catch (err) {
+    reply.code(500);
+    return { error: err.message };
+  }
+}
+
+// GET /api/tokens/status - Provider API status
+async function getTokenStatusRoute(request, reply) {
+  try {
+    const result = await checkProviderStatus();
+    return result;
+  } catch (err) {
+    reply.code(500);
+    return { error: err.message };
+  }
+}
+
+// POST /api/tokens/record - Record token usage
+async function recordTokenUsageRoute(request, reply) {
+  try {
+    const result = await storeTokenUsage(request.body);
+    if (result.success) {
+      reply.code(201);
+    } else {
+      reply.code(400);
+    }
+    return result;
+  } catch (err) {
+    reply.code(500);
+    return { error: err.message };
+  }
+}
+
+// ============================================================================
+// NEW CHANNEL/CHAT ROUTES (Phase 1)
+// ============================================================================
+
+// GET /api/channels - List all channels user has access to
+async function getChannelsRoute(request, reply) {
+  try {
+    const userId = request.user?.id;
+    if (!userId) {
+      reply.code(401);
+      return { error: 'Authentication required' };
+    }
+
+    const { type } = request.query;
+    const channels = await getChannels(userId, { type });
+
+    return {
+      channels,
+      count: channels.length
+    };
+  } catch (err) {
+    reply.code(500);
+    return { error: err.message };
+  }
+}
+
+// GET /api/channels/:id/messages - Get messages for a channel
+async function getChannelMessagesRouteNew(request, reply) {
+  try {
+    const userId = request.user?.id;
+    if (!userId) {
+      reply.code(401);
+      return { error: 'Authentication required' };
+    }
+
+    const { id } = request.params;
+    const { limit = 50, offset = 0 } = request.query;
+
+    const result = await getChannelMessages(userId, id, { limit: parseInt(limit), offset: parseInt(offset) });
+
+    return result;
+  } catch (err) {
+    reply.code(500);
+    return { error: err.message };
+  }
+}
+
+// POST /api/channels/:id/messages - Create new message in channel
+async function postChannelMessageRoute(request, reply) {
+  try {
+    const userId = request.user?.id;
+    if (!userId) {
+      reply.code(401);
+      return { error: 'Authentication required' };
+    }
+
+    const { id } = request.params;
+    const { content, metadata } = request.body;
+
+    if (!content || !content.trim()) {
+      reply.code(400);
+      return { error: 'Content is required' };
+    }
+
+    const message = await sendChannelMessage(userId, id, content, { metadata });
+
+    reply.code(201);
+    return message;
+  } catch (err) {
+    reply.code(500);
+    return { error: err.message };
+  }
+}
+
+// POST /api/dm - Create or get DM channel with a user
+async function createDmRoute(request, reply) {
+  try {
+    const userId = request.user?.id;
+    if (!userId) {
+      reply.code(401);
+      return { error: 'Authentication required' };
+    }
+
+    const { userId: targetUserId } = request.body;
+
+    if (!targetUserId) {
+      reply.code(400);
+      return { error: 'userId is required' };
+    }
+
+    const channel = await getOrCreateDMChannel(userId, targetUserId);
+
+    reply.code(201);
+    return channel;
+  } catch (err) {
+    reply.code(500);
+    return { error: err.message };
+  }
+}
+
+// POST /api/channels/project/:projectId - Create project channel
+async function createProjectChannelRoute(request, reply) {
+  try {
+    const userId = request.user?.id;
+    if (!userId) {
+      reply.code(401);
+      return { error: 'Authentication required' };
+    }
+
+    const { projectId } = request.params;
+
+    const channel = await createChannel({
+      type: 'project',
+      projectId,
+      createdBy: userId
+    });
+
+    reply.code(201);
+    return channel;
+  } catch (err) {
+    reply.code(500);
+    return { error: err.message };
+  }
+}
+
+// ============================================================================
+// TOKEN MONITORING ROUTES (NEW - Per Leonardo's Spec)
+// ============================================================================
+
+// GET /api/tokens/dashboard - Overall summary across all providers
+async function getTokensDashboardRoute(request, reply) {
+  try {
+    const { month } = request.query;
+    const result = await getDashboardSummary(month);
+    return result;
+  } catch (err) {
+    reply.code(500);
+    return { error: err.message };
+  }
+}
+
+// GET /api/tokens/providers/:provider - Detailed data for specific provider
+async function getTokensProviderRoute(request, reply) {
+  try {
+    const { provider } = request.params;
+    const { month } = request.query;
+    const result = await getProviderDetails(provider, month);
+
+    if (result.error) {
+      reply.code(400);
+    }
+    return result;
+  } catch (err) {
+    reply.code(500);
+    return { error: err.message };
+  }
+}
+
+// GET /api/tokens/usage - Daily usage for charts
+async function getTokensUsageRoute(request, reply) {
+  try {
+    const { provider } = request.query;
+    if (!provider) {
+      reply.code(400);
+      return { error: 'provider query parameter is required' };
+    }
+    const { month } = request.query;
+    const result = await getDailyUsage(provider, month);
+    return result;
+  } catch (err) {
+    reply.code(500);
+    return { error: err.message };
+  }
+}
+
+// GET /api/tokens/models - Per-model breakdown
+async function getTokensModelsRoute(request, reply) {
+  try {
+    const { month } = request.query;
+    const result = await getModelsBreakdown(month);
+    return result;
+  } catch (err) {
+    reply.code(500);
+    return { error: err.message };
+  }
+}
+
+// GET /api/tokens/monthly - Monthly aggregated data for all providers
+async function getTokensMonthlyRoute(request, reply) {
+  try {
+    const { month } = request.query; // Format: YYYY-MM
+
+    if (!month || !/^\d{4}-\d{2}$/.test(month)) {
+      reply.code(400);
+      return { error: 'month parameter required (format: YYYY-MM)' };
+    }
+
+    const db = getDb();
+
+    // Get monthly totals for each provider
+    const monthlyData = db.prepare(`
+      SELECT 
+        provider,
+        SUM(total_tokens) as total_tokens,
+        SUM(prompt_tokens) as input_tokens,
+        SUM(completion_tokens) as output_tokens,
+        SUM(cost_usd) as total_cost,
+        COUNT(*) as request_count
+      FROM cost_records
+      WHERE strftime('%Y-%m', recorded_at) = ?
+      GROUP BY provider
+    `).all(month);
+
+    // Get daily breakdown for the month
+    const dailyBreakdown = db.prepare(`
+      SELECT 
+        date(recorded_at) as date,
+        provider,
+        SUM(total_tokens) as tokens,
+        SUM(cost_usd) as cost
+      FROM cost_records
+      WHERE strftime('%Y-%m', recorded_at) = ?
+      GROUP BY date(recorded_at), provider
+      ORDER BY date(recorded_at)
+    `).all(month);
+
+    // Get model breakdown for the month
+    const modelBreakdown = db.prepare(`
+      SELECT 
+        provider,
+        model,
+        SUM(total_tokens) as tokens,
+        SUM(cost_usd) as cost,
+        COUNT(*) as requests
+      FROM cost_records
+      WHERE strftime('%Y-%m', recorded_at) = ?
+      GROUP BY provider, model
+      ORDER BY cost DESC
+    `).all(month);
+
+    return {
+      month,
+      providers: monthlyData,
+      daily: dailyBreakdown,
+      models: modelBreakdown
+    };
+  } catch (err) {
+    reply.code(500);
+    return { error: err.message };
+  }
+}
+
+// GET /api/tokens/live - Real live data: Kimi balance + per-agent model breakdown from DB
+async function getTokensLiveRoute(request, reply) {
+  try {
+    const db = getDb();
+    const { month } = request.query;
+    const now = month ? new Date(month + '-01') : new Date();
+    const start = now.getFullYear() + '-' + String(now.getMonth() + 1).padStart(2, '0') + '-01T00:00:00.000Z';
+    const nextMonth = new Date(now.getFullYear(), now.getMonth() + 1, 1);
+    const end = nextMonth.getFullYear() + '-' + String(nextMonth.getMonth() + 1).padStart(2, '0') + '-01T00:00:00.000Z';
+
+    let kimiBalance = null;
+    if (process.env.MOONSHOT_API_KEY) {
+      try { kimiBalance = await getKimiLiveBalance(); } catch (e) { }
+    }
+
+    const agentRows = db.prepare(`
+      SELECT
+        COALESCE(cr.user_id, 'unknown') AS agent_id,
+        COALESCE(u.name, cr.user_id, 'Unknown Agent') AS agent_name,
+        cr.provider, cr.model,
+        SUM(cr.total_tokens) AS total_tokens,
+        SUM(cr.prompt_tokens) AS input_tokens,
+        SUM(cr.completion_tokens) AS output_tokens,
+        SUM(cr.cost_usd) AS cost_usd,
+        COUNT(*) AS requests,
+        MAX(cr.recorded_at) AS last_used
+      FROM cost_records cr
+      LEFT JOIN users u ON u.id = cr.user_id
+      WHERE cr.recorded_at >= ? AND cr.recorded_at < ?
+      GROUP BY cr.user_id, cr.provider, cr.model
+      ORDER BY cost_usd DESC
+    `).all(start, end);
+
+    const providerRows = db.prepare(`
+      SELECT provider,
+        SUM(cost_usd) AS cost_usd, SUM(total_tokens) AS total_tokens,
+        SUM(prompt_tokens) AS input_tokens, SUM(completion_tokens) AS output_tokens,
+        COUNT(*) AS requests
+      FROM cost_records WHERE recorded_at >= ? AND recorded_at < ?
+      GROUP BY provider
+    `).all(start, end);
+
+    const totals = db.prepare(`
+      SELECT SUM(cost_usd) AS total_cost, SUM(total_tokens) AS total_tokens,
+        COUNT(*) AS total_requests,
+        COUNT(DISTINCT COALESCE(user_id,'unknown')) AS unique_agents
+      FROM cost_records WHERE recorded_at >= ? AND recorded_at < ?
+    `).get(start, end);
+
+    return {
+      period: month || (now.getFullYear() + '-' + String(now.getMonth() + 1).padStart(2, '0')),
+      kimi: kimiBalance ? {
+        cashBalance: kimiBalance.cashBalance || 0,
+        voucherBalance: kimiBalance.voucherBalance || 0,
+        totalBalance: kimiBalance.totalBalance || 0,
+        currency: kimiBalance.currency || 'CNY',
+      } : null,
+      totals: {
+        cost: parseFloat((totals?.total_cost || 0).toFixed(4)),
+        tokens: totals?.total_tokens || 0,
+        requests: totals?.total_requests || 0,
+        agents: totals?.unique_agents || 0,
+      },
+      providers: providerRows.map(p => ({
+        provider: p.provider,
+        cost: parseFloat((p.cost_usd || 0).toFixed(4)),
+        tokens: p.total_tokens || 0,
+        input: p.input_tokens || 0,
+        output: p.output_tokens || 0,
+        requests: p.requests || 0,
+      })),
+      agents: agentRows.map(r => ({
+        agentId: r.agent_id, agentName: r.agent_name,
+        provider: r.provider, model: r.model,
+        tokens: r.total_tokens || 0, input: r.input_tokens || 0,
+        output: r.output_tokens || 0,
+        cost: parseFloat((r.cost_usd || 0).toFixed(4)),
+        requests: r.requests || 0, lastUsed: r.last_used,
+      })),
+    };
+  } catch (err) {
+    reply.code(500);
+    return { error: err.message };
+  }
+}
+
+
+// GET /api/agents/chat - Get all approved manager agents with online status for chat
+async function getAgentsForChatRoute(request, reply) {
+  try {
+    const db = getDb();
+    const agents = db.prepare(`
+      SELECT id, name, handle, avatar_url, role, status, skills, experience_level
+      FROM manager_agents
+      WHERE is_approved = 1
+      ORDER BY status DESC, name ASC
+    `).all();
+
+    return {
+      agents: agents.map(a => ({
+        ...a,
+        skills: JSON.parse(a.skills || '[]'),
+        status: a.status || 'offline',
+      }))
+    };
+  } catch (err) {
+    reply.code(500);
+    return { error: err.message };
+  }
+}
+
+
+module.exports = {
+  // Projects
+  listProjects,
+  getProject,
+  createProject,
+  updateProjectStatus,
+
+  // Tasks - Phase 3
+  getProjectTasks,
+  createTask,
+  getTaskById,
+  updateTask,
+  deleteTask,
+  assignTask,
+  acceptTask,
+  rejectTask,
+  startTask,
+  completeTask,
+  cancelTask,
+  addTaskComment,
+  getAgentTasks,
+  getMyTasks,
+  searchTasks,
+
+  // Legacy Costs
+  getCosts,
+  getCostSummary,
+  recordCost,
+
+  // Real Costs
+  getActualCostsRoute,
+  getLiveCostsRoute,
+  syncCostsRoute,
+  getBudgetVsActualRoute,
+  getModelCostsRoute,
+  getCreditsRoute,
+
+  // Token Dashboard (Legacy)
+  getTokenDashboardRoute,
+  getProviderTokensRoute,
+  getContextTokensRoute,
+  getTokenStatusRoute,
+  recordTokenUsageRoute,
+
+  // Token Monitoring (NEW - Per Spec)
+  getTokensDashboardRoute,
+  getTokensLiveRoute,
+  getAgentsForChatRoute,
+  getTokensProviderRoute,
+  getTokensUsageRoute,
+  getTokensModelsRoute,
+  getTokensMonthlyRoute,
+
+  // Chat (Legacy)
+  sendMessageRoute,
+  getChannelMessagesRoute,
+  getDmHistoryRoute,
+  getUserDmChannelsRoute,
+  sendDmRoute,
+  editMessageRoute,
+  deleteMessageRoute,
+
+  // Channels
+  listChannelsRoute,
+  getChannelMessagesByIdRoute,
+  sendChannelMessageRoute,
+  createOrGetDmRoute,
+  createProjectChannelRoute,
+
+  // Auth
+  telegramAuthRoute,
+  loginRoute,
+  logoutRoute,
+  getMeRoute,
+  registerRoute,
+
+  // Agents
+  listAgents,
+  getAgent,
+  registerAgentRoute,
+  approveAgentRoute,
+  listPendingAgentsRoute,
+  listApprovedAgentsRoute,
+
+  // Budgets
+  createBudgetRoute,
+  listBudgetsRoute,
+
+  // Machines
+  registerMachineRoute,
+  listMachinesRoute,
+
+  // Project Assignment (Phase 2)
+  assignAgentToProjectRouteV2,
+  removeAgentFromProjectRouteV2,
+  getProjectAgentsRoute,
+  getAgentProjectsRoute,
+  updateAgentProjectRoleRoute,
+
+  // Manager Agents (New)
+  listManagerAgentsRoute,
+  getManagerAgentRoute,
+  registerManagerAgentRoute,
+  approveManagerAgentRoute,
+  updateManagerAgentStatusRoute,
+  getAgentNotificationsRoute,
+  markNotificationReadRoute,
+  assignAgentToProjectRoute,
+  removeAgentFromProjectRoute
+};
+
+// ============================================================================
+// MACHINE-AGENT LINK ROUTES
+// ============================================================================
+
+async function linkMachineAgentRoute(request, reply) {
+  try {
+    const db = getDb();
+    const { machineId, agentId } = request.params;
+    const now = new Date().toISOString();
+
+    const machine = db.prepare('SELECT id FROM machines WHERE id = ?').get(machineId);
+    if (!machine) { reply.code(404); return { error: 'Machine not found' }; }
+
+    const agent = db.prepare('SELECT id FROM manager_agents WHERE id = ?').get(agentId);
+    if (!agent) { reply.code(404); return { error: 'Agent not found' }; }
+
+    try {
+      const id = generateId();
+      db.prepare('INSERT INTO machine_agents (id, machine_id, agent_id, started_at, status) VALUES (?, ?, ?, ?, ?)')
+        .run(id, machineId, agentId, now, 'running');
+      reply.code(201);
+      return { id, machine_id: machineId, agent_id: agentId, started_at: now, status: 'running' };
+    } catch (e) {
+      if (e.message.includes('UNIQUE')) { reply.code(409); return { error: 'Agent already linked to this machine' }; }
+      throw e;
+    }
+  } catch (err) { reply.code(500); return { error: err.message }; }
+}
+
+async function unlinkMachineAgentRoute(request, reply) {
+  try {
+    const db = getDb();
+    const { machineId, agentId } = request.params;
+    const now = new Date().toISOString();
+
+    const link = db.prepare('SELECT id FROM machine_agents WHERE machine_id = ? AND agent_id = ?').get(machineId, agentId);
+    if (!link) { reply.code(404); return { error: 'Link not found' }; }
+
+    db.prepare('UPDATE machine_agents SET status = ?, stopped_at = ? WHERE machine_id = ? AND agent_id = ?')
+      .run('stopped', now, machineId, agentId);
+
+    return { success: true, machine_id: machineId, agent_id: agentId, stopped_at: now };
+  } catch (err) { reply.code(500); return { error: err.message }; }
+}
+
+module.exports.linkMachineAgentRoute = linkMachineAgentRoute;
+module.exports.unlinkMachineAgentRoute = unlinkMachineAgentRoute;
