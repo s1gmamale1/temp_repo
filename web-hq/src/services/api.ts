@@ -554,10 +554,24 @@ export class WebSocketClient {
 }
 
 // Export singleton instances
+export const notificationsApi = {
+  list: (params?: { unread_only?: boolean; limit?: number }) => {
+    const qs = new URLSearchParams(params as Record<string, string>).toString();
+    return fetchApi(`/api/notifications${qs ? '?' + qs : ''}`);
+  },
+  markRead: (id: string) =>
+    fetchApi(`/api/notifications/${id}/read`, { method: 'POST' }),
+  markAllRead: () =>
+    fetchApi('/api/notifications/read-all', { method: 'POST' }),
+};
+
 export const wsClient = new WebSocketClient();
 
 // Auth API
 export const authApi = {
+  changePassword: (currentPassword: string, newPassword: string) =>
+    fetchApi('/api/auth/change-password', { method: 'POST', body: JSON.stringify({ currentPassword, newPassword }) }),
+
   login: async (credentials: { login: string; password: string } | string, password?: string) => {
     const login = typeof credentials === 'object' ? credentials.login : credentials;
     const pwd = typeof credentials === 'object' ? credentials.password : password;

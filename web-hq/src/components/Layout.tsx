@@ -3,9 +3,9 @@ import { Link, useLocation } from 'react-router-dom';
 import {
   LayoutDashboard, FolderKanban, CheckSquare, DollarSign,
   Activity, Settings, MessageSquare, Bot, Menu, X,
-  Cpu, LogOut, ChevronRight, Shield, Coins, UserPlus
+  Cpu, LogOut, ChevronRight, Shield, Coins, UserPlus, Radio, Shuffle
 } from 'lucide-react';
-import NotificationCenter from './NotificationCenter';
+import NotificationBell from './NotificationBell';
 
 interface LayoutProps {
   children: React.ReactNode;
@@ -15,10 +15,12 @@ interface LayoutProps {
 
 const NAV = [
   { path: '/', icon: LayoutDashboard, label: 'Dashboard', group: 'main' },
+  { path: '/hq', icon: Radio, label: 'HQ', group: 'main' },
   { path: '/projects', icon: FolderKanban, label: 'Projects', group: 'main' },
   { path: '/tasks', icon: CheckSquare, label: 'Tasks', group: 'main' },
   { path: '/agents', icon: Bot, label: 'Agents', group: 'main' },
   { path: '/chat', icon: MessageSquare, label: 'Comms', group: 'main' },
+  { path: '/assign', icon: Shuffle, label: 'Assign', group: 'main' },
   { path: '/costs', icon: DollarSign, label: 'Costs', group: 'ops' },
   { path: '/tokens', icon: Coins, label: 'Tokens', group: 'ops' },
   { path: '/activity', icon: Activity, label: 'Activity', group: 'ops' },
@@ -137,7 +139,7 @@ export default function Layout({ children, user, onLogout }: LayoutProps) {
               <span className="ops-dot ops-dot-green ops-dot-pulse" />
               <span style={{ fontFamily: 'var(--font-mono)', fontSize: 10, color: 'var(--green)', letterSpacing: '0.08em' }}>ONLINE</span>
             </div>
-            <NotificationCenter />
+            <NotificationBell />
           </div>
         </header>
 

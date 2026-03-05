@@ -370,9 +370,15 @@ async function buildServer() {
   fastify.post('/api/admin/agents/:id/approve', { preHandler: authMiddleware }, routes.approveManagerAgentRoute);
   fastify.get('/api/admin/agents/pending', { preHandler: authMiddleware }, routes.listPendingAgentsRoute);
   fastify.get('/api/admin/agents/approved', { preHandler: authMiddleware }, routes.listApprovedAgentsRoute);
+  fastify.get('/api/admin/users', { preHandler: authMiddleware }, routes.listUsersRoute);
   fastify.post('/api/agents/:id/status', { preHandler: authMiddleware }, routes.updateManagerAgentStatusRoute);
   fastify.get('/api/agents/:id/notifications', { preHandler: authMiddleware }, routes.getAgentNotificationsRoute);
   fastify.post('/api/agents/:id/notifications/:notificationId/read', { preHandler: authMiddleware }, routes.markNotificationReadRoute);
+
+  // User notifications
+  fastify.get('/api/notifications', { preHandler: authMiddleware }, routes.getNotificationsRoute);
+  fastify.post('/api/notifications/:id/read', { preHandler: authMiddleware }, routes.markNotificationReadRoute);
+  fastify.post('/api/notifications/read-all', { preHandler: authMiddleware }, routes.markAllNotificationsReadRoute);
   fastify.post('/api/agents/:id/projects/:projectId', { preHandler: authMiddleware }, routes.assignAgentToProjectRoute);
   fastify.delete('/api/agents/:id/projects/:projectId', { preHandler: authMiddleware }, routes.removeAgentFromProjectRoute);
   fastify.get('/api/agents/:id/projects', { preHandler: authMiddleware }, routes.getAgentProjectsRoute);
@@ -722,13 +728,6 @@ process.on('unhandledRejection', (reason, promise) => {
 });
 
 // ============================================================================
-// NOTIFICATION ROUTES
-// ============================================================================
-fastify.get('/api/notifications', { preHandler: authMiddleware }, routes.getNotificationsRoute);
-fastify.post('/api/notifications/:id/read', { preHandler: authMiddleware }, routes.markNotificationReadRoute);
-fastify.post('/api/notifications/read-all', { preHandler: authMiddleware }, routes.markAllNotificationsReadRoute);
-fastify.get('/api/agents/:id/notifications', { preHandler: authMiddleware }, routes.getAgentNotificationsRoute);
-
 start();
 
 module.exports = { buildServer };

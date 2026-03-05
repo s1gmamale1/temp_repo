@@ -142,6 +142,7 @@ export default function Chat({ currentUser }: ChatProps) {
 
     return (
       <button
+        key={`ch-btn-${ch.id}`}
         onClick={() => { setChannel(ch.id); setSidebarOpen(false); }}
         style={{
           width: '100%', display: 'flex', alignItems: 'center', gap: 8,
@@ -151,7 +152,7 @@ export default function Chat({ currentUser }: ChatProps) {
         }}
       >
         {ch.type === 'dm' ? (
-          <div style={{ position: 'relative', flexShrink: 0 }}>
+          <div key={`avatar-${ch.id}`} style={{ position: 'relative', flexShrink: 0 }}>
             <div style={{
               width: 18, height: 18, borderRadius: 2,
               background: agentColor(label) + '33',
@@ -167,7 +168,7 @@ export default function Chat({ currentUser }: ChatProps) {
             }} />
           </div>
         ) : (
-          <Hash size={10} style={{ color: active ? 'var(--amber)' : 'var(--text-lo)', flexShrink: 0 }} />
+          <Hash key={`hash-${ch.id}`} size={10} style={{ color: active ? 'var(--amber)' : 'var(--text-lo)', flexShrink: 0 }} />
         )}
         <span style={{
           ...M, fontSize: 11, flex: 1, textAlign: 'left',
@@ -175,7 +176,7 @@ export default function Chat({ currentUser }: ChatProps) {
           overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
         }}>{label}</span>
         {(ch.unread_count || 0) > 0 && (
-          <span style={{
+          <span key={`unread-${ch.id}`} style={{
             ...M, fontSize: 9, background: '#ef4444', color: '#fff',
             borderRadius: 9, padding: '1px 5px', flexShrink: 0,
           }}>{ch.unread_count}</span>
@@ -199,7 +200,7 @@ export default function Chat({ currentUser }: ChatProps) {
         transition: 'width 200ms ease, min-width 200ms ease', overflow: 'hidden',
       }}>
         {/* Header */}
-        <div style={{
+        <div key="sidebar-header" style={{
           padding: '11px 14px', borderBottom: '1px solid var(--ink-4)',
           display: 'flex', alignItems: 'center', gap: 8, flexShrink: 0,
         }}>
@@ -217,9 +218,9 @@ export default function Chat({ currentUser }: ChatProps) {
         </div>
 
         {/* Tab switcher */}
-        <div style={{ display: 'flex', borderBottom: '1px solid var(--ink-4)', flexShrink: 0 }}>
+        <div key="tab-switcher" style={{ display: 'flex', borderBottom: '1px solid var(--ink-4)', flexShrink: 0 }}>
           {(['channels', 'agents'] as const).map(t => (
-            <button key={t} onClick={() => setTab(t)} style={{
+            <button key={`tab-${t}`} onClick={() => setTab(t)} style={{
               flex: 1, padding: '7px 0', border: 'none', cursor: 'pointer',
               background: tab === t ? 'var(--ink-3)' : 'transparent',
               borderBottom: tab === t ? '1px solid var(--amber)' : '1px solid transparent',
@@ -231,9 +232,9 @@ export default function Chat({ currentUser }: ChatProps) {
 
         {/* CHANNELS TAB */}
         {tab === 'channels' && (
-          <div style={{ flex: 1, overflowY: 'auto', padding: '6px 4px' }}>
+          <div key="channels-tab" style={{ flex: 1, overflowY: 'auto', padding: '6px 4px' }}>
             {error && (
-              <div style={{
+              <div key="error-msg" style={{
                 ...M, fontSize: 10, color: '#ef4444', margin: '4px 6px 6px',
                 background: '#ef444412', border: '1px solid #ef444430', borderRadius: 2,
                 padding: '6px 8px', display: 'flex', gap: 6
@@ -244,50 +245,50 @@ export default function Chat({ currentUser }: ChatProps) {
             )}
 
             {/* General */}
-            <div style={{
+            <div key="general-header" style={{
               ...M, fontSize: 9, color: 'var(--text-lo)', letterSpacing: '0.1em',
               textTransform: 'uppercase', padding: '6px 10px 3px'
             }}>General</div>
-            {channelsByType.general.map(ch => <ChBtn key={ch.id} ch={ch} />)}
+            {channelsByType.general.map(ch => <ChBtn key={`ch-${ch.id}`} ch={ch} />)}
 
             {/* Projects */}
             {channelsByType.project.length > 0 && <>
-              <div style={{
+              <div key="projects-header" style={{
                 ...M, fontSize: 9, color: 'var(--text-lo)', letterSpacing: '0.1em',
                 textTransform: 'uppercase', padding: '10px 10px 3px'
               }}>Projects</div>
-              {channelsByType.project.map(ch => <ChBtn key={ch.id} ch={ch} />)}
+              {channelsByType.project.map(ch => <ChBtn key={`ch-${ch.id}`} ch={ch} />)}
             </>}
 
             {/* DMs */}
             {channelsByType.dm.length > 0 && <>
-              <div style={{
+              <div key="dms-header" style={{
                 ...M, fontSize: 9, color: 'var(--text-lo)', letterSpacing: '0.1em',
                 textTransform: 'uppercase', padding: '10px 10px 3px'
               }}>Direct Messages</div>
-              {channelsByType.dm.map(ch => <ChBtn key={ch.id} ch={ch} />)}
+              {channelsByType.dm.map(ch => <ChBtn key={`ch-${ch.id}`} ch={ch} />)}
             </>}
           </div>
         )}
 
         {/* AGENTS TAB */}
         {tab === 'agents' && (
-          <div style={{ flex: 1, overflowY: 'auto', padding: '6px 4px' }}>
-            <div style={{
+          <div key="agents-tab" style={{ flex: 1, overflowY: 'auto', padding: '6px 4px' }}>
+            <div key="agents-header" style={{
               ...M, fontSize: 9, color: 'var(--text-lo)', letterSpacing: '0.1em',
               textTransform: 'uppercase', padding: '6px 10px 3px'
             }}>
               {agents.filter(a => a.status === 'online').length} Online · {agents.filter(a => a.status !== 'online').length} Offline
             </div>
-            {agents.map(agent => {
+            {agents.map((agent, idx) => {
               const col = agentColor(agent.name);
               const online = agent.status === 'online';
               return (
-                <div key={agent.id} style={{
+                <div key={`agent-${agent.id}-${idx}`} style={{
                   display: 'flex', alignItems: 'center', gap: 8,
                   padding: '6px 10px', borderRadius: 2,
                 }}>
-                  <div style={{ position: 'relative', flexShrink: 0 }}>
+                  <div key={`agent-avatar-${agent.id}`} style={{ position: 'relative', flexShrink: 0 }}>
                     <div style={{
                       width: 26, height: 26, borderRadius: 2,
                       background: col + '33', border: `1px solid ${col}66`,
@@ -301,16 +302,17 @@ export default function Chat({ currentUser }: ChatProps) {
                       border: '1px solid var(--ink-2)',
                     }} />
                   </div>
-                  <div style={{ flex: 1, minWidth: 0 }}>
+                  <div key={`agent-info-${agent.id}`} style={{ flex: 1, minWidth: 0 }}>
                     <div style={{
                       ...M, fontSize: 11, color: 'var(--text-hi)',
                       overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap'
                     }}>
                       {agent.name}
                     </div>
-                    <div style={{ ...M, fontSize: 9, color: col }}>{agent.role}</div>
+                    <div key={`agent-role-${agent.id}`} style={{ ...M, fontSize: 9, color: col }}>{agent.role}</div>
                   </div>
                   <button
+                    key={`agent-dm-btn-${agent.id}`}
                     onClick={() => startDm(agent)}
                     disabled={dmLoading === agent.id}
                     title="Open DM"
@@ -329,7 +331,7 @@ export default function Chat({ currentUser }: ChatProps) {
               );
             })}
             {agents.length === 0 && (
-              <div style={{ ...M, fontSize: 10, color: 'var(--text-lo)', padding: '20px', textAlign: 'center' }}>
+              <div key="no-agents" style={{ ...M, fontSize: 10, color: 'var(--text-lo)', padding: '20px', textAlign: 'center' }}>
                 — no agents registered —
               </div>
             )}
@@ -337,7 +339,7 @@ export default function Chat({ currentUser }: ChatProps) {
         )}
 
         {/* User footer */}
-        <div style={{
+        <div key="user-footer" style={{
           padding: '9px 12px', borderTop: '1px solid var(--ink-4)',
           display: 'flex', alignItems: 'center', gap: 8, flexShrink: 0,
         }}>
@@ -353,7 +355,7 @@ export default function Chat({ currentUser }: ChatProps) {
             }}>
               {currentUser?.name || 'User'}
             </div>
-            <div style={{ ...M, fontSize: 9, color: 'var(--amber)' }}>{currentUser?.role || 'user'}</div>
+            <div key="user-role" style={{ ...M, fontSize: 9, color: 'var(--amber)' }}>{currentUser?.role || 'user'}</div>
           </div>
         </div>
       </aside>
@@ -362,7 +364,7 @@ export default function Chat({ currentUser }: ChatProps) {
       <div style={{ flex: 1, display: 'flex', flexDirection: 'column', minWidth: 0 }}>
 
         {/* Channel header */}
-        <div style={{
+        <div key="channel-header" style={{
           height: 44, background: 'var(--ink-2)', borderBottom: '1px solid var(--ink-4)',
           display: 'flex', alignItems: 'center', padding: '0 14px', gap: 10, flexShrink: 0,
         }}>
@@ -375,7 +377,7 @@ export default function Chat({ currentUser }: ChatProps) {
 
           {selectedCh?.type === 'dm' ? (
             <>
-              <div style={{ position: 'relative', flexShrink: 0 }}>
+              <div key="dm-avatar" style={{ position: 'relative', flexShrink: 0 }}>
                 <div style={{
                   width: 24, height: 24, borderRadius: 2,
                   background: agentColor(selectedCh.dm_agent_name || selectedCh.name) + '33',
@@ -391,10 +393,10 @@ export default function Chat({ currentUser }: ChatProps) {
                   border: '1px solid var(--ink-2)',
                 }} />
               </div>
-              <span style={{ ...M, fontSize: 13, fontWeight: 700, color: 'var(--text-hi)' }}>
+              <span key="dm-name" style={{ ...M, fontSize: 13, fontWeight: 700, color: 'var(--text-hi)' }}>
                 {selectedCh.dm_agent_name || selectedCh.name}
               </span>
-              <span style={{
+              <span key="dm-status" style={{
                 ...M, fontSize: 9, padding: '2px 7px', borderRadius: 2,
                 background: selectedCh.dm_agent_status === 'online' ? '#10b98115' : '#4b556315',
                 border: `1px solid ${selectedCh.dm_agent_status === 'online' ? '#10b98133' : '#4b556333'}`,
@@ -403,12 +405,12 @@ export default function Chat({ currentUser }: ChatProps) {
             </>
           ) : (
             <>
-              <Hash size={12} style={{ color: 'var(--amber)', flexShrink: 0 }} />
-              <span style={{ ...M, fontSize: 13, fontWeight: 700, color: 'var(--text-hi)' }}>
+              <Hash key="channel-hash" size={12} style={{ color: 'var(--amber)', flexShrink: 0 }} />
+              <span key="channel-name" style={{ ...M, fontSize: 13, fontWeight: 700, color: 'var(--text-hi)' }}>
                 {selectedCh?.name?.replace('project-', '') || '—'}
               </span>
               {selectedCh?.description && (
-                <span style={{
+                <span key="channel-desc" style={{
                   ...M, fontSize: 10, color: 'var(--text-lo)',
                   borderLeft: '1px solid var(--ink-4)', paddingLeft: 10,
                   overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1,
@@ -417,7 +419,7 @@ export default function Chat({ currentUser }: ChatProps) {
             </>
           )}
 
-          <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 8 }}>
+          <div key="connection-status" style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 8 }}>
             <span style={{
               ...M, fontSize: 9, padding: '3px 8px', borderRadius: 2, letterSpacing: '0.06em',
               color: isConnected ? '#10b981' : '#ef4444',
@@ -428,9 +430,9 @@ export default function Chat({ currentUser }: ChatProps) {
         </div>
 
         {/* Messages */}
-        <div style={{ flex: 1, overflowY: 'auto', padding: '12px 16px' }}>
+        <div key="messages-container" style={{ flex: 1, overflowY: 'auto', padding: '12px 16px' }}>
           {msgList.length === 0 && typingUsers.size === 0 ? (
-            <div style={{
+            <div key="empty-state" style={{
               height: '100%', display: 'flex', flexDirection: 'column',
               alignItems: 'center', justifyContent: 'center', gap: 10, opacity: 0.5
             }}>
@@ -451,10 +453,10 @@ export default function Chat({ currentUser }: ChatProps) {
               </div>
             </div>
           ) : (
-            Object.entries(groupByDate(msgList)).map(([date, msgs]) => (
-              <div key={date}>
+            Object.entries(groupByDate(msgList)).map(([date, msgs], dateIdx) => (
+              <div key={`date-group-${date}-${dateIdx}`}>
                 {/* Date divider */}
-                <div style={{ display: 'flex', alignItems: 'center', gap: 10, margin: '14px 0 8px' }}>
+                <div key={`divider-${date}`} style={{ display: 'flex', alignItems: 'center', gap: 10, margin: '14px 0 8px' }}>
                   <div style={{ flex: 1, height: 1, background: 'var(--ink-4)' }} />
                   <span style={{
                     ...M, fontSize: 9, color: 'var(--text-lo)',
@@ -469,15 +471,18 @@ export default function Chat({ currentUser }: ChatProps) {
                   const name = msg.sender_name || msg.user_name || msg.agent_name || 'Unknown';
                   const col = isMe ? 'var(--amber)' : agentColor(name);
 
+                  // Generate unique key for message
+                  const messageKey = msg.id || `msg-${idx}-${msg.created_at}`;
+
                   return (
-                    <div key={msg.id} style={{
+                    <div key={messageKey} style={{
                       display: 'flex', gap: 8, marginBottom: showHd ? 10 : 2,
                       flexDirection: isMe ? 'row-reverse' : 'row',
                       opacity: msg.isOptimistic ? 0.6 : 1,
                       transition: 'opacity 150ms',
                     }}>
                       {/* Avatar */}
-                      <div style={{ width: 26, height: 26, flexShrink: 0, marginTop: 2 }}>
+                      <div key={`avatar-${messageKey}`} style={{ width: 26, height: 26, flexShrink: 0, marginTop: 2 }}>
                         {showHd ? (
                           <div style={{
                             width: 26, height: 26, borderRadius: 2,
@@ -489,26 +494,32 @@ export default function Chat({ currentUser }: ChatProps) {
                       </div>
 
                       {/* Content */}
-                      <div style={{ flex: 1, minWidth: 0, textAlign: isMe ? 'right' : 'left' }}>
+                      <div key={`content-${messageKey}`} style={{ flex: 1, minWidth: 0, textAlign: isMe ? 'right' : 'left' }}>
                         {showHd && (
-                          <div style={{
+                          <div key={`header-${messageKey}`} style={{
                             display: 'flex', alignItems: 'center', gap: 6, marginBottom: 3,
                             justifyContent: isMe ? 'flex-end' : 'flex-start',
                           }}>
                             <span style={{ ...M, fontSize: 11, fontWeight: 700, color: col }}>{name}</span>
                             {msg.agent_role && (
-                              <span style={{
+                              <span key={`role-${messageKey}`} style={{
                                 ...M, fontSize: 9, color: 'var(--text-lo)',
                                 background: 'var(--ink-3)', border: '1px solid var(--ink-4)',
                                 borderRadius: 2, padding: '1px 5px',
                               }}>{msg.agent_role}</span>
                             )}
-                            <span style={{ ...M, fontSize: 9, color: 'var(--text-lo)' }}>
+                            <span key={`time-${messageKey}`} style={{ ...M, fontSize: 9, color: 'var(--text-lo)' }}>
                               {fmtTime(msg.created_at)}
                             </span>
+                            {msg.isOptimistic && (
+                              <span key={`sending-${messageKey}`} style={{ ...M, fontSize: 9, color: 'var(--text-lo)' }}>• sending...</span>
+                            )}
+                            {msg.error && (
+                              <span key={`error-${messageKey}`} style={{ ...M, fontSize: 9, color: '#ef4444' }}>• failed</span>
+                            )}
                           </div>
                         )}
-                        <div style={{
+                        <div key={`bubble-${messageKey}`} style={{
                           display: 'inline-block', textAlign: 'left', maxWidth: '76%',
                           background: isMe ? 'var(--amber)1a' : 'var(--ink-3)',
                           border: `1px solid ${isMe ? 'var(--amber)44' : 'var(--ink-4)'}`,
@@ -520,11 +531,11 @@ export default function Chat({ currentUser }: ChatProps) {
                           }}>
                             {msg.content.split(/(@\w+)/g).map((part, i) =>
                               part.startsWith('@') ? (
-                                <span key={i} style={{
+                                <span key={`mention-${i}-${messageKey}`} style={{
                                   color: 'var(--amber)', background: 'var(--amber)18',
                                   borderRadius: 2, padding: '0 3px',
                                 }}>{part}</span>
-                              ) : <span key={i}>{part}</span>
+                              ) : <span key={`text-${i}-${messageKey}`}>{part}</span>
                             )}
                           </div>
                         </div>
@@ -538,9 +549,9 @@ export default function Chat({ currentUser }: ChatProps) {
 
           {/* Typing indicator */}
           {typingUsers.size > 0 && (
-            <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginTop: 6, paddingLeft: 34 }}>
+            <div key="typing-indicator" style={{ display: 'flex', alignItems: 'center', gap: 6, marginTop: 6, paddingLeft: 34 }}>
               {[0, 1, 2].map(i => (
-                <span key={i} style={{
+                <span key={`typing-dot-${i}`} style={{
                   width: 5, height: 5, borderRadius: '50%', background: 'var(--text-lo)',
                   display: 'inline-block', animation: 'bounce 1s infinite',
                   animationDelay: `${i * 150}ms`,
@@ -551,21 +562,22 @@ export default function Chat({ currentUser }: ChatProps) {
               </span>
             </div>
           )}
-          <div ref={endRef} />
+          <div key="messages-end" ref={endRef} />
         </div>
 
         {/* Input */}
-        <div style={{
+        <div key="input-area" style={{
           padding: '10px 14px', background: 'var(--ink-2)',
           borderTop: '1px solid var(--ink-4)', flexShrink: 0,
         }}>
           <form onSubmit={handleSend} style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-            <button type="button" style={{
+            <button key="plus-btn" type="button" style={{
               background: 'none', border: 'none', cursor: 'pointer',
               color: 'var(--text-lo)', display: 'flex', alignItems: 'center', padding: 4,
             }}><Plus size={13} /></button>
 
             <input
+              key="message-input"
               type="text"
               value={input}
               onChange={handleTyping}
@@ -580,12 +592,12 @@ export default function Chat({ currentUser }: ChatProps) {
               onBlur={e => { e.currentTarget.style.borderColor = 'var(--ink-4)'; }}
             />
 
-            <button type="button" style={{
+            <button key="at-btn" type="button" style={{
               background: 'none', border: 'none', cursor: 'pointer',
               color: 'var(--text-lo)', display: 'flex', alignItems: 'center', padding: 4,
             }}><AtSign size={12} /></button>
 
-            <button type="submit" disabled={!input.trim() || !currentId} style={{
+            <button key="send-btn" type="submit" disabled={!input.trim() || !currentId} style={{
               background: input.trim() ? 'var(--amber)' : 'var(--ink-3)',
               border: `1px solid ${input.trim() ? 'var(--amber)' : 'var(--ink-4)'}`,
               borderRadius: 2, padding: '7px 14px', cursor: input.trim() ? 'pointer' : 'default',
@@ -595,7 +607,7 @@ export default function Chat({ currentUser }: ChatProps) {
             }}><Send size={12} /></button>
           </form>
 
-          <div style={{ ...M, fontSize: 9, color: 'var(--text-lo)', marginTop: 5, display: 'flex', gap: 12 }}>
+          <div key="input-hints" style={{ ...M, fontSize: 9, color: 'var(--text-lo)', marginTop: 5, display: 'flex', gap: 12 }}>
             <span>Enter to send</span><span>·</span>
             <span>@ to mention</span><span>·</span>
             <span>{typingUsers.size > 0 ? `${Array.from(typingUsers)[0]} is typing…` : 'Markdown supported'}</span>

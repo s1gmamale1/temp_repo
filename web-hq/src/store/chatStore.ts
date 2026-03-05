@@ -19,6 +19,7 @@ export interface Message {
   agent_role?: string;
   metadata?: Record<string, any>;
   isOptimistic?: boolean;
+  error?: boolean;
 }
 
 export interface Channel {
@@ -83,6 +84,8 @@ interface State {
   loading: boolean;
   error: string | null;
   typingUsers: Set<string>;
+  // Track which DMs are being opened to prevent duplicate requests
+  openingDm: string | null;
 }
 
 interface Actions {
@@ -117,6 +120,7 @@ export const useChatStore = create<ChatStore>()((set, get) => ({
   loading: false,
   error: null,
   typingUsers: new Set(),
+  openingDm: null,
 
   // ── Actions ──────────────────────────────────────────────────────────────
 
@@ -128,7 +132,7 @@ export const useChatStore = create<ChatStore>()((set, get) => ({
         ? { ...s.channels, [id]: { ...s.channels[id], unread_count: 0 } }
         : s.channels,
     }));
-    get().fetchMessages(id); // always refresh on select (also triggers updateLastRead)
+    get().fetchMessages(id);
     wsClient.subscribeToChannel(id);
   },
 
@@ -170,29 +174,65 @@ export const useChatStore = create<ChatStore>()((set, get) => ({
   },
 
   sendMessage: async (channelId, content, currentUser) => {
-    const tempId = `temp-${Date.now()}`;
+    const tempId = `temp-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+
+    // Add optimistic message immediately
     get()._putMessage({
-      id: tempId, channel_id: channelId, content,
-      created_at: new Date().toISOString(), message_type: 'text',
-      sender_id: currentUser?.id, sender_name: currentUser?.name || 'You',
-      sender_type: 'user', isOptimistic: true,
+      id: tempId,
+      channel_id: channelId,
+      content,
+      created_at: new Date().toISOString(),
+      message_type: 'text',
+      sender_id: currentUser?.id,
+      sender_name: currentUser?.name || 'You',
+      sender_type: 'user',
+      isOptimistic: true,
     });
+
     try {
       const res = await chatApi.sendMessage(channelId, { content });
       const real = res?.message;
+
       if (real) {
         const m = norm(real, channelId);
+
         set(s => {
-          const ids = (s.channelMessages[channelId] || []).map(id => id === tempId ? m.id : id);
-          const msgs = { ...s.messages, [m.id]: m };
-          delete msgs[tempId];
-          return { messages: msgs, channelMessages: { ...s.channelMessages, [channelId]: ids } };
+          // Build new messages object
+          const newMessages = { ...s.messages };
+
+          // Remove optimistic message
+          delete newMessages[tempId];
+
+          // Add real message if not already there
+          if (!newMessages[m.id]) {
+            newMessages[m.id] = m;
+          }
+
+          // Update channel message list - replace temp id with real id
+          const oldIds = s.channelMessages[channelId] || [];
+          const newIds = oldIds.map(id => id === tempId ? m.id : id);
+
+          // If real message id wasn't in the list, add it
+          if (!newIds.includes(m.id)) {
+            newIds.push(m.id);
+          }
+
+          // Remove any duplicates
+          const uniqueIds = [...new Set(newIds)];
+
+          return {
+            messages: newMessages,
+            channelMessages: { ...s.channelMessages, [channelId]: uniqueIds }
+          };
         });
       }
     } catch (err: any) {
       console.error('sendMessage failed:', err);
       set(s => ({
-        messages: { ...s.messages, [tempId]: { ...s.messages[tempId], isOptimistic: false } },
+        messages: {
+          ...s.messages,
+          [tempId]: { ...s.messages[tempId], isOptimistic: false, error: true }
+        },
         error: 'Message failed to send',
       }));
     }
@@ -212,22 +252,77 @@ export const useChatStore = create<ChatStore>()((set, get) => ({
   },
 
   openDm: async (agentId, userId) => {
+    // Prevent multiple simultaneous requests for same agent
+    if (get().openingDm === agentId) {
+      console.log('Already opening DM for this agent, waiting...');
+      // Wait and return existing channel if found
+      await new Promise(resolve => setTimeout(resolve, 500));
+      const existing = Object.values(get().channels).find(
+        ch => ch.type === 'dm' && ch.dm_agent_id === agentId
+      );
+      if (existing) {
+        get().setCurrentChannel(existing.id);
+        return existing.id;
+      }
+      return null;
+    }
+
+    // First check if we already have this DM channel locally
+    const existingChannel = Object.values(get().channels).find(
+      ch => ch.type === 'dm' && ch.dm_agent_id === agentId
+    );
+
+    if (existingChannel) {
+      // Already exists, just switch to it
+      get().setCurrentChannel(existingChannel.id);
+      return existingChannel.id;
+    }
+
+    set({ openingDm: agentId });
+
     try {
       const res = await fetch(`${API()}/api/channels/dm/${userId}`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token()}` },
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${token()}`
+        },
         body: JSON.stringify({ agent_id: agentId }),
       });
-      if (!res.ok) throw new Error(await res.text());
+
+      if (!res.ok) {
+        const errorText = await res.text();
+        throw new Error(errorText);
+      }
+
       const data = await res.json();
       const ch: Channel = data?.channel;
+
       if (ch) {
-        get()._putChannel(ch);
+        // Double-check we don't already have this channel (race condition)
+        const stillExists = Object.values(get().channels).find(
+          existing => existing.dm_agent_id === agentId
+        );
+
+        if (stillExists) {
+          get().setCurrentChannel(stillExists.id);
+          return stillExists.id;
+        }
+
+        // Only add if not already in store
+        if (!get().channels[ch.id]) {
+          get()._putChannel(ch);
+        }
+
+        get().setCurrentChannel(ch.id);
         wsClient.subscribeToChannel(ch.id);
         return ch.id;
       }
-    } catch (err) {
+    } catch (err: any) {
       console.error('openDm:', err);
+      set({ error: 'Failed to open DM: ' + err.message });
+    } finally {
+      set({ openingDm: null });
     }
     return null;
   },
@@ -235,18 +330,61 @@ export const useChatStore = create<ChatStore>()((set, get) => ({
   setIsConnected: (v) => set({ isConnected: v }),
   clearError: () => set({ error: null }),
 
-  _putMessage: (msg) => set(s => {
+  _putMessage: (msg) => set((s) => {
     const cid = msg.channel_id;
     if (!cid) return s;
+
+    // Check if message already exists by ID
+    if (s.messages[msg.id]) return s;
+
+    // Check for optimistic duplicate (same content, same sender, very close time)
+    const optimisticDuplicate = Object.values(s.messages).find(m =>
+      m.channel_id === cid &&
+      m.content === msg.content &&
+      m.sender_id === msg.sender_id &&
+      m.isOptimistic &&
+      Math.abs(new Date(m.created_at).getTime() - new Date(msg.created_at).getTime()) < 5000
+    );
+
+    if (optimisticDuplicate && !msg.isOptimistic) {
+      // Replace optimistic message with real one
+      const optimisticId = optimisticDuplicate.id;
+      const newMessages = { ...s.messages };
+      delete newMessages[optimisticId];
+      newMessages[msg.id] = msg;
+
+      const newChannelMessages = { ...s.channelMessages };
+      const oldIds = newChannelMessages[cid] || [];
+      newChannelMessages[cid] = oldIds.map(id => id === optimisticId ? msg.id : id);
+
+      return { messages: newMessages, channelMessages: newChannelMessages };
+    }
+
+    // Check for exact duplicate by content+sender+time (within 1 second)
+    const isDuplicate = Object.values(s.messages).some(m =>
+      m.channel_id === cid &&
+      m.content === msg.content &&
+      m.sender_id === msg.sender_id &&
+      !m.isOptimistic &&
+      Math.abs(new Date(m.created_at).getTime() - new Date(msg.created_at).getTime()) < 1000
+    );
+
+    if (isDuplicate) return s;
+
     const ids = s.channelMessages[cid] || [];
     if (ids.includes(msg.id)) return s;
+
     return {
       messages: { ...s.messages, [msg.id]: msg },
       channelMessages: { ...s.channelMessages, [cid]: [...ids, msg.id] },
     };
   }),
 
-  _putChannel: (ch) => set(s => ({ channels: { ...s.channels, [ch.id]: ch } })),
+  _putChannel: (ch) => set(s => {
+    // Don't overwrite if channel already exists
+    if (s.channels[ch.id]) return s;
+    return { channels: { ...s.channels, [ch.id]: ch } };
+  }),
 
   _agentPresence: (agentId, online) => set(s => ({
     agents: s.agents.map(a =>

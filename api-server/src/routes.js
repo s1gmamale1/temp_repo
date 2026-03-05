@@ -3852,6 +3852,24 @@ async function getAgentsForChatRoute(request, reply) {
 }
 
 
+
+// GET /api/admin/users - List all users (admin only)
+async function listUsersRoute(request, reply) {
+  const user = request.user;
+  if (!user || user.role !== 'admin') {
+    reply.code(403);
+    return { error: 'Admin access required' };
+  }
+  try {
+    const { role, limit, offset } = request.query;
+    const result = await listUsers({ role, limit, offset });
+    return result;
+  } catch (err) {
+    reply.code(500);
+    return { error: err.message };
+  }
+}
+
 module.exports = {
   // Projects
   listProjects,
@@ -3960,7 +3978,13 @@ module.exports = {
   getAgentNotificationsRoute,
   markNotificationReadRoute,
   assignAgentToProjectRoute,
-  removeAgentFromProjectRoute
+  removeAgentFromProjectRoute,
+
+  // User Notifications
+  getNotificationsRoute,
+  listUsersRoute,
+  markNotificationReadRoute,
+  markAllNotificationsReadRoute
 };
 
 // ============================================================================
@@ -4101,8 +4125,4 @@ async function getAgentNotificationsRoute(request, reply) {
 
 module.exports.linkMachineAgentRoute = linkMachineAgentRoute;
 module.exports.unlinkMachineAgentRoute = unlinkMachineAgentRoute;
-// Notifications
-getNotificationsRoute,
-  markNotificationReadRoute,
-  markAllNotificationsReadRoute,
-  getAgentNotificationsRoute
+// Notifications - exported in module.exports above

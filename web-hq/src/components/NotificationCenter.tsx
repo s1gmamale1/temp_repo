@@ -1,208 +1,106 @@
 import { useState, useEffect, useRef } from 'react';
-import { 
-  Bell, 
-  Check, 
-  X, 
-  Target, 
-  MessageSquare, 
-  UserPlus, 
-  AlertTriangle,
-  Loader2,
-  ExternalLink
+import {
+  Bell, Check, X, Target, MessageSquare, UserPlus,
+  AlertTriangle, Loader2, CheckSquare, ExternalLink
 } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
+import { useNotificationStore } from '../store/notificationStore';
+import type { Notification } from '../store/notificationStore';
 
-export interface Notification {
-  id: string;
-  type: 'project_assignment' | 'message' | 'task_assigned' | 'mention' | 'system';
-  title: string;
-  message: string;
-  metadata?: {
-    projectId?: string;
-    projectName?: string;
-    role?: string;
-    assignedBy?: string;
-    senderName?: string;
-    taskId?: string;
-    taskTitle?: string;
-    channelId?: string;
-  };
-  read: boolean;
-  createdAt: string;
-}
-
-// Mock notifications data - in real implementation, this would come from API/WebSocket
-const mockNotifications: Notification[] = [
-  {
-    id: '1',
-    type: 'project_assignment',
-    title: 'New Project Assignment',
-    message: 'You\'ve been assigned to "Notion→Video Pipeline" as Project Lead',
-    metadata: {
-      projectId: 'proj-123',
-      projectName: 'Notion→Video Pipeline',
-      role: 'Project Lead',
-      assignedBy: 'Scorpion',
-    },
-    read: false,
-    createdAt: new Date(Date.now() - 1000 * 60 * 5).toISOString(), // 5 mins ago
-  },
-  {
-    id: '2',
-    type: 'message',
-    title: 'New Message',
-    message: 'Leonardo sent you a message in #general',
-    metadata: {
-      senderName: 'Leonardo',
-      channelId: 'chan-456',
-    },
-    read: false,
-    createdAt: new Date(Date.now() - 1000 * 60 * 30).toISOString(), // 30 mins ago
-  },
-  {
-    id: '3',
-    type: 'task_assigned',
-    title: 'Task Assigned',
-    message: 'You have been assigned to "Fix API authentication bug"',
-    metadata: {
-      taskId: 'task-789',
-      taskTitle: 'Fix API authentication bug',
-      projectId: 'proj-123',
-    },
-    read: true,
-    createdAt: new Date(Date.now() - 1000 * 60 * 60 * 2).toISOString(), // 2 hours ago
-  },
-];
+export type { Notification };
 
 export default function NotificationCenter() {
   const [isOpen, setIsOpen] = useState(false);
-  const [notifications, setNotifications] = useState<Notification[]>(mockNotifications);
-  const [_loading] = useState(false);
   const dropdownRef = useRef<HTMLDivElement>(null);
   const navigate = useNavigate();
 
-  const unreadCount = notifications.filter(n => !n.read).length;
+  const {
+    notifications, unreadCount, loading,
+    fetchNotifications, markRead, markAllRead, dismiss,
+  } = useNotificationStore();
 
-  // Close dropdown when clicking outside
+  useEffect(() => { fetchNotifications(); }, [fetchNotifications]);
+
+  // Close on outside click
   useEffect(() => {
-    const handleClickOutside = (event: MouseEvent) => {
-      if (dropdownRef.current && !dropdownRef.current.contains(event.target as Node)) {
+    const h = (e: MouseEvent) => {
+      if (dropdownRef.current && !dropdownRef.current.contains(e.target as Node))
         setIsOpen(false);
-      }
     };
-
-    document.addEventListener('mousedown', handleClickOutside);
-    return () => document.removeEventListener('mousedown', handleClickOutside);
+    document.addEventListener('mousedown', h);
+    return () => document.removeEventListener('mousedown', h);
   }, []);
 
-  // Fetch notifications on mount (mock)
-  useEffect(() => {
-    // In real implementation: fetchNotifications()
-  }, []);
-
-  const markAsRead = (id: string) => {
-    setNotifications(prev => 
-      prev.map(n => n.id === id ? { ...n, read: true } : n)
-    );
-  };
-
-  const markAllAsRead = () => {
-    setNotifications(prev => prev.map(n => ({ ...n, read: true })));
-  };
-
-  const dismissNotification = (id: string) => {
-    setNotifications(prev => prev.filter(n => n.id !== id));
-  };
-
-  const handleNotificationClick = (notification: Notification) => {
-    markAsRead(notification.id);
-    
-    // Navigate based on notification type
-    switch (notification.type) {
-      case 'project_assignment':
-        if (notification.metadata?.projectId) {
-          navigate(`/projects/${notification.metadata.projectId}`);
-        }
-        break;
-      case 'message':
-        if (notification.metadata?.channelId) {
-          navigate(`/chat?channel=${notification.metadata.channelId}`);
-        } else {
-          navigate('/chat');
-        }
-        break;
-      case 'task_assigned':
-        if (notification.metadata?.taskId) {
-          navigate(`/tasks?task=${notification.metadata.taskId}`);
-        } else {
-          navigate('/tasks');
-        }
-        break;
-      default:
-        break;
-    }
-    
+  const handleClick = (n: Notification) => {
+    if (!n.is_read) markRead(n.id);
     setIsOpen(false);
-  };
-
-  const handleAcceptAssignment = (e: React.MouseEvent, notification: Notification) => {
-    e.stopPropagation();
-    markAsRead(notification.id);
-    // In real implementation: API call to accept
-    if (notification.metadata?.projectId) {
-      navigate(`/projects/${notification.metadata.projectId}`);
+    switch (n.type) {
+      case 'project_assignment': case 'project_assigned':
+        navigate(n.data?.project_id ? `/projects/${n.data.project_id}` : '/projects'); break;
+      case 'dm_message': case 'message':
+        navigate('/chat'); break;
+      case 'task_assigned': case 'task_accepted': case 'task_rejected': case 'task_completed':
+        navigate(n.data?.task_id ? `/tasks?task=${n.data.task_id}` : '/tasks'); break;
+      case 'agent_registered':
+        navigate('/admin'); break;
     }
-    setIsOpen(false);
   };
 
-  const handleDeclineAssignment = (e: React.MouseEvent, id: string) => {
-    e.stopPropagation();
-    // In real implementation: API call to decline
-    dismissNotification(id);
-  };
-
-  const getNotificationIcon = (type: Notification['type']) => {
+  const getIcon = (type: string) => {
+    const s: React.CSSProperties = {
+      width: 28, height: 28, borderRadius: 3, flexShrink: 0,
+      display: 'flex', alignItems: 'center', justifyContent: 'center',
+    };
     switch (type) {
-      case 'project_assignment':
-        return <div className="w-10 h-10 bg-indigo-500/20 rounded-full flex items-center justify-center"><Target className="w-5 h-5 text-indigo-400" /></div>;
-      case 'message':
-        return <div className="w-10 h-10 bg-blue-500/20 rounded-full flex items-center justify-center"><MessageSquare className="w-5 h-5 text-blue-400" /></div>;
+      case 'project_assignment': case 'project_assigned':
+        return <div style={{ ...s, background: '#4f46e512', border: '1px solid #4f46e530' }}><Target size={13} style={{ color: '#818cf8' }} /></div>;
+      case 'dm_message': case 'message':
+        return <div style={{ ...s, background: '#0ea5e912', border: '1px solid #0ea5e930' }}><MessageSquare size={13} style={{ color: '#38bdf8' }} /></div>;
       case 'task_assigned':
-        return <div className="w-10 h-10 bg-green-500/20 rounded-full flex items-center justify-center"><UserPlus className="w-5 h-5 text-green-400" /></div>;
-      case 'mention':
-        return <div className="w-10 h-10 bg-yellow-500/20 rounded-full flex items-center justify-center"><AlertTriangle className="w-5 h-5 text-yellow-400" /></div>;
+        return <div style={{ ...s, background: '#10b98112', border: '1px solid #10b98130' }}><UserPlus size={13} style={{ color: '#34d399' }} /></div>;
+      case 'task_accepted': case 'task_completed':
+        return <div style={{ ...s, background: '#10b98112', border: '1px solid #10b98130' }}><CheckSquare size={13} style={{ color: '#34d399' }} /></div>;
+      case 'task_rejected':
+        return <div style={{ ...s, background: '#ef444412', border: '1px solid #ef444430' }}><AlertTriangle size={13} style={{ color: '#f87171' }} /></div>;
+      case 'agent_registered':
+        return <div style={{ ...s, background: '#f59e0b12', border: '1px solid #f59e0b30' }}><UserPlus size={13} style={{ color: '#fbbf24' }} /></div>;
       default:
-        return <div className="w-10 h-10 bg-slate-500/20 rounded-full flex items-center justify-center"><Bell className="w-5 h-5 text-slate-400" /></div>;
+        return <div style={{ ...s, background: '#64748b12', border: '1px solid #64748b30' }}><Bell size={13} style={{ color: '#94a3b8' }} /></div>;
     }
   };
 
-  const formatTime = (dateStr: string) => {
-    const date = new Date(dateStr);
-    const now = new Date();
-    const diff = now.getTime() - date.getTime();
-    
-    const minutes = Math.floor(diff / 60000);
-    const hours = Math.floor(diff / 3600000);
-    const days = Math.floor(diff / 86400000);
-    
-    if (minutes < 1) return 'Just now';
-    if (minutes < 60) return `${minutes}m ago`;
-    if (hours < 24) return `${hours}h ago`;
-    if (days < 7) return `${days}d ago`;
-    return date.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+  const fmtTime = (ts: string) => {
+    const d = Date.now() - new Date(ts).getTime();
+    const m = Math.floor(d / 60000), h = Math.floor(d / 3600000), dy = Math.floor(d / 86400000);
+    if (m < 1) return 'just now';
+    if (m < 60) return `${m}m ago`;
+    if (h < 24) return `${h}h ago`;
+    if (dy < 7) return `${dy}d ago`;
+    return new Date(ts).toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
   };
+
+  const M: React.CSSProperties = { fontFamily: 'var(--font-mono)' };
 
   return (
-    <div className="relative" ref={dropdownRef}>
-      {/* Bell Icon Button */}
+    <div style={{ position: 'relative' }} ref={dropdownRef}>
+      {/* Bell */}
       <button
-        onClick={() => setIsOpen(!isOpen)}
-        className="relative p-2 text-slate-400 hover:text-slate-200 hover:bg-slate-700 rounded-lg transition-colors"
-        aria-label="Notifications"
+        onClick={() => { setIsOpen(o => !o); if (!isOpen) fetchNotifications(); }}
+        style={{
+          position: 'relative', padding: 6, background: 'none', border: 'none',
+          cursor: 'pointer', color: 'var(--text-lo)', borderRadius: 4, lineHeight: 0,
+        }}
+        title="Notifications"
       >
-        <Bell className="w-5 h-5" />
+        <Bell size={15} />
         {unreadCount > 0 && (
-          <span className="absolute -top-1 -right-1 w-5 h-5 bg-red-500 text-white text-xs font-medium rounded-full flex items-center justify-center animate-pulse">
+          <span style={{
+            position: 'absolute', top: 1, right: 1,
+            minWidth: 15, height: 15, borderRadius: 8,
+            background: '#ef4444', color: '#fff',
+            ...M, fontSize: 8, fontWeight: 700,
+            display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '0 3px',
+          }}>
             {unreadCount > 9 ? '9+' : unreadCount}
           </span>
         )}
@@ -210,132 +108,134 @@ export default function NotificationCenter() {
 
       {/* Dropdown */}
       {isOpen && (
-        <div className="absolute right-0 top-full mt-2 w-96 bg-slate-800 rounded-xl border border-slate-700 shadow-2xl z-50 overflow-hidden">
+        <div style={{
+          position: 'absolute', right: 0, top: 'calc(100% + 6px)',
+          width: 350, background: 'var(--ink-2)',
+          border: '1px solid var(--ink-4)', borderRadius: 4,
+          boxShadow: '0 8px 32px rgba(0,0,0,0.5)', zIndex: 200, overflow: 'hidden',
+        }}>
           {/* Header */}
-          <div className="flex items-center justify-between px-4 py-3 border-b border-slate-700">
-            <h3 className="font-semibold text-slate-200">Notifications</h3>
-            <div className="flex items-center gap-2">
+          <div style={{
+            display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+            padding: '9px 12px', borderBottom: '1px solid var(--ink-4)',
+          }}>
+            <span style={{ ...M, fontSize: 10, fontWeight: 700, color: 'var(--text-hi)', letterSpacing: '0.1em' }}>
+              NOTIFICATIONS {unreadCount > 0 && <span style={{ color: '#ef4444' }}>({unreadCount})</span>}
+            </span>
+            <div style={{ display: 'flex', gap: 4, alignItems: 'center' }}>
               {unreadCount > 0 && (
-                <button
-                  onClick={markAllAsRead}
-                  className="text-xs text-indigo-400 hover:text-indigo-300 flex items-center gap-1 px-2 py-1 rounded hover:bg-indigo-500/10 transition-colors"
-                >
-                  <Check className="w-3 h-3" />
-                  Mark all read
+                <button onClick={markAllRead} style={{
+                  ...M, fontSize: 8, padding: '3px 7px', cursor: 'pointer',
+                  background: 'none', border: '1px solid var(--ink-4)', borderRadius: 3,
+                  color: 'var(--amber)', letterSpacing: '0.06em',
+                  display: 'flex', alignItems: 'center', gap: 3,
+                }}>
+                  <Check size={8} /> MARK ALL READ
                 </button>
               )}
-              <button
-                onClick={() => setIsOpen(false)}
-                className="p-1 text-slate-400 hover:text-slate-200 hover:bg-slate-700 rounded transition-colors"
-              >
-                <X className="w-4 h-4" />
+              <button onClick={() => setIsOpen(false)} style={{
+                background: 'none', border: 'none', cursor: 'pointer',
+                color: 'var(--text-lo)', padding: 2, lineHeight: 0,
+              }}>
+                <X size={12} />
               </button>
             </div>
           </div>
 
-          {/* Notifications List */}
-          <div className="max-h-96 overflow-y-auto">
-            {_loading ? (
-              <div className="flex items-center justify-center py-8">
-                <Loader2 className="w-6 h-6 text-indigo-400 animate-spin" />
+          {/* List */}
+          <div style={{ maxHeight: 380, overflowY: 'auto' }}>
+            {loading ? (
+              <div style={{ display: 'flex', justifyContent: 'center', padding: 28 }}>
+                <Loader2 size={18} style={{ color: 'var(--amber)', animation: 'spin 1s linear infinite' }} />
               </div>
             ) : notifications.length === 0 ? (
-              <div className="text-center py-8 px-4">
-                <Bell className="w-12 h-12 text-slate-600 mx-auto mb-3" />
-                <p className="text-slate-400">No notifications</p>
-                <p className="text-sm text-slate-500 mt-1">You're all caught up!</p>
+              <div style={{ textAlign: 'center', padding: '32px 16px' }}>
+                <Bell size={26} style={{ color: 'var(--text-dim)', margin: '0 auto 10px', display: 'block' }} />
+                <div style={{ ...M, fontSize: 11, color: 'var(--text-lo)' }}>No notifications</div>
+                <div style={{ ...M, fontSize: 9, color: 'var(--text-dim)', marginTop: 3 }}>You're all caught up</div>
               </div>
             ) : (
-              <div className="divide-y divide-slate-700">
-                {notifications.map((notification) => (
-                  <div
-                    key={notification.id}
-                    onClick={() => handleNotificationClick(notification)}
-                    className={`p-4 hover:bg-slate-700/50 transition-colors cursor-pointer group ${
-                      !notification.read ? 'bg-slate-700/20' : ''
-                    }`}
-                  >
-                    <div className="flex gap-3">
-                      {getNotificationIcon(notification.type)}
-                      <div className="flex-1 min-w-0">
-                        <div className="flex items-start justify-between gap-2">
-                          <p className={`font-medium text-sm ${!notification.read ? 'text-slate-100' : 'text-slate-300'}`}>
-                            {notification.title}
-                          </p>
-                          <div className="flex items-center gap-1">
-                            {!notification.read && (
-                              <span className="w-2 h-2 bg-indigo-500 rounded-full" />
-                            )}
-                            <button
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                dismissNotification(notification.id);
-                              }}
-                              className="opacity-0 group-hover:opacity-100 p-1 text-slate-500 hover:text-red-400 hover:bg-red-500/10 rounded transition-all"
-                            >
-                              <X className="w-3 h-3" />
-                            </button>
-                          </div>
-                        </div>
-                        <p className="text-sm text-slate-400 mt-1 line-clamp-2">
-                          {notification.message}
-                        </p>
-                        
-                        {/* Project Assignment Specific UI */}
-                        {notification.type === 'project_assignment' && notification.metadata && (
-                          <div className="mt-3 space-y-2">
-                            <div className="text-xs text-slate-500">
-                              <span className="text-slate-400">Role:</span>{' '}
-                              <span className="text-indigo-400">{notification.metadata.role}</span>
-                              <span className="mx-2">•</span>
-                              <span className="text-slate-400">By:</span>{' '}
-                              <span className="text-slate-300">{notification.metadata.assignedBy}</span>
-                            </div>
-                            <div className="flex gap-2">
-                              <button
-                                onClick={(e) => handleAcceptAssignment(e, notification)}
-                                className="flex-1 flex items-center justify-center gap-1.5 px-3 py-1.5 bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-medium rounded transition-colors"
-                              >
-                                <ExternalLink className="w-3 h-3" />
-                                View Project
-                              </button>
-                              <button
-                                onClick={(e) => handleDeclineAssignment(e, notification.id)}
-                                className="px-3 py-1.5 bg-slate-700 hover:bg-slate-600 text-slate-300 text-xs font-medium rounded transition-colors"
-                              >
-                                Decline
-                              </button>
-                            </div>
-                          </div>
-                        )}
-                        
-                        <p className="text-xs text-slate-500 mt-2">
-                          {formatTime(notification.createdAt)}
-                        </p>
-                      </div>
-                    </div>
-                  </div>
-                ))}
-              </div>
+              notifications.map(n => (
+                <NotifRow key={n.id} n={n} M={M} getIcon={getIcon} fmtTime={fmtTime}
+                  onClick={() => handleClick(n)} onDismiss={() => dismiss(n.id)} />
+              ))
             )}
           </div>
 
           {/* Footer */}
           {notifications.length > 0 && (
-            <div className="px-4 py-3 border-t border-slate-700 bg-slate-800/50">
-              <button
-                onClick={() => {
-                  navigate('/notifications');
-                  setIsOpen(false);
-                }}
-                className="w-full text-center text-sm text-slate-400 hover:text-slate-200 transition-colors"
-              >
-                View all notifications
+            <div style={{ padding: '7px 12px', borderTop: '1px solid var(--ink-4)', textAlign: 'center' }}>
+              <button onClick={() => { setIsOpen(false); navigate('/activity'); }} style={{
+                ...M, fontSize: 9, background: 'none', border: 'none',
+                cursor: 'pointer', color: 'var(--text-lo)', letterSpacing: '0.06em',
+              }}>
+                VIEW ALL ACTIVITY →
               </button>
             </div>
           )}
         </div>
       )}
+    </div>
+  );
+}
+
+function NotifRow({ n, M, getIcon, fmtTime, onClick, onDismiss }: {
+  n: Notification; M: React.CSSProperties;
+  getIcon: (t: string) => React.ReactNode;
+  fmtTime: (ts: string) => string;
+  onClick: () => void; onDismiss: () => void;
+}) {
+  const [hov, setHov] = useState(false);
+  return (
+    <div
+      onClick={onClick}
+      onMouseEnter={() => setHov(true)}
+      onMouseLeave={() => setHov(false)}
+      style={{
+        display: 'flex', gap: 10, padding: '10px 12px', cursor: 'pointer',
+        borderBottom: '1px solid var(--ink-4)',
+        background: hov ? 'var(--ink-3)' : !n.is_read ? 'rgba(250,168,26,0.04)' : 'transparent',
+        transition: 'background 100ms',
+      }}
+    >
+      {getIcon(n.type)}
+      <div style={{ flex: 1, minWidth: 0 }}>
+        <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 6 }}>
+          <span style={{ ...M, fontSize: 11, fontWeight: 600, color: !n.is_read ? 'var(--text-hi)' : 'var(--text-mid)' }}>
+            {n.title}
+          </span>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 4, flexShrink: 0 }}>
+            {!n.is_read && <span style={{ width: 5, height: 5, borderRadius: '50%', background: 'var(--amber)' }} />}
+            <button
+              onClick={e => { e.stopPropagation(); onDismiss(); }}
+              style={{
+                background: 'none', border: 'none', cursor: 'pointer', padding: 1,
+                color: 'var(--text-lo)', lineHeight: 0,
+                opacity: hov ? 1 : 0, transition: 'opacity 100ms',
+              }}
+            ><X size={10} /></button>
+          </div>
+        </div>
+        <div style={{ ...M, fontSize: 10, color: 'var(--text-lo)', marginTop: 2, lineHeight: 1.5 }}>
+          {n.content}
+        </div>
+        {(n.type === 'project_assignment' || n.type === 'project_assigned') && n.data?.project_id && (
+          <div style={{ marginTop: 6 }}>
+            <button
+              onClick={e => { e.stopPropagation(); onClick(); }}
+              style={{
+                ...M, fontSize: 9, padding: '3px 8px', fontWeight: 700,
+                background: 'var(--amber)', color: '#000',
+                border: 'none', borderRadius: 3, cursor: 'pointer',
+                display: 'inline-flex', alignItems: 'center', gap: 3,
+              }}
+            ><ExternalLink size={8} /> VIEW PROJECT</button>
+          </div>
+        )}
+        <div style={{ ...M, fontSize: 9, color: 'var(--text-dim)', marginTop: 4 }}>
+          {fmtTime(n.created_at)}
+        </div>
+      </div>
     </div>
   );
 }

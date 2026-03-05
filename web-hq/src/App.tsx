@@ -18,6 +18,8 @@ import AdminPanel from './pages/AdminPanel';
 import Agents from './pages/Agents';
 import AgentRegistration from './pages/AgentRegistration';
 import AgentDetail from './pages/AgentDetail';
+import HQ from './pages/HQ';
+import ProjectAssignmentBoard from './pages/ProjectAssignmentBoard';
 import { userSession, wsClient } from './services/api';
 import { useChatStore } from './store/chatStore';
 
@@ -206,6 +208,8 @@ function App() {
           <Route path="/agents" element={<Agents />} />
           <Route path="/agents/register" element={<AgentRegistration />} />
           <Route path="/agents/:id" element={<AgentDetail />} />
+          <Route path="/hq" element={<HQ />} />
+          <Route path="/assign" element={<ProjectAssignmentBoard />} />
           <Route
             path="/admin"
             element={

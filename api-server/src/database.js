@@ -386,31 +386,34 @@ class SQLiteAdapter {
 
       if (hasConstraint?.sql?.includes('REFERENCES agents(id)')) {
         console.log('🔧 Migrating channels table - removing dm_agent_id FK constraint...');
-        this.db.exec(`
-          BEGIN;
-          CREATE TABLE IF NOT EXISTS channels_new (
-            id TEXT PRIMARY KEY DEFAULT (lower(hex(randomblob(16)))),
-            name TEXT NOT NULL,
-            type TEXT CHECK(type IN ('general', 'project', 'dm')) NOT NULL DEFAULT 'general',
-            created_by TEXT REFERENCES users(id),
-            project_id TEXT REFERENCES projects(id),
-            participant_1_id TEXT REFERENCES users(id),
-            participant_2_id TEXT REFERENCES users(id),
-            is_dm INTEGER DEFAULT 0,
-            dm_user_id TEXT REFERENCES users(id),
-            dm_agent_id TEXT,
-            is_archived BOOLEAN DEFAULT FALSE,
-            created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-          );
-          INSERT OR IGNORE INTO channels_new SELECT * FROM channels;
-          DROP TABLE channels;
-          ALTER TABLE channels_new RENAME TO channels;
-          CREATE INDEX IF NOT EXISTS idx_channels_type ON channels(type);
-          CREATE INDEX IF NOT EXISTS idx_channels_project ON channels(project_id);
-          CREATE INDEX IF NOT EXISTS idx_channels_is_dm ON channels(is_dm);
-          CREATE INDEX IF NOT EXISTS idx_channels_archived ON channels(is_archived);
-          COMMIT;
-        `);
+        const migrate = this.db.transaction(() => {
+          this.db.exec(`
+            CREATE TABLE IF NOT EXISTS channels_new (
+              id TEXT PRIMARY KEY DEFAULT (lower(hex(randomblob(16)))),
+              name TEXT NOT NULL,
+              type TEXT CHECK(type IN ('general', 'project', 'dm')) NOT NULL DEFAULT 'general',
+              created_by TEXT REFERENCES users(id),
+              project_id TEXT REFERENCES projects(id),
+              participant_1_id TEXT REFERENCES users(id),
+              participant_2_id TEXT REFERENCES users(id),
+              is_dm INTEGER DEFAULT 0,
+              dm_user_id TEXT REFERENCES users(id),
+              dm_agent_id TEXT,
+              is_archived BOOLEAN DEFAULT FALSE,
+              created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            )
+          `);
+          this.db.prepare(`INSERT OR IGNORE INTO channels_new SELECT * FROM channels`).run();
+          this.db.exec(`DROP TABLE channels`);
+          this.db.exec(`ALTER TABLE channels_new RENAME TO channels`);
+          this.db.exec(`
+            CREATE INDEX IF NOT EXISTS idx_channels_type ON channels(type);
+            CREATE INDEX IF NOT EXISTS idx_channels_project ON channels(project_id);
+            CREATE INDEX IF NOT EXISTS idx_channels_is_dm ON channels(is_dm);
+            CREATE INDEX IF NOT EXISTS idx_channels_archived ON channels(is_archived)
+          `);
+        });
+        migrate();
         console.log('✅ channels table migrated');
       }
     } catch (migErr) {
@@ -569,8 +572,8 @@ class SQLiteAdapter {
       console.log('✅ Created admin user Scorpion  —  password: Scorpion123');
     }
 
-    // Insert Sigma as first Manager Agent (if not exists)
-    const sigmaExists = this.db.prepare("SELECT id FROM manager_agents WHERE id = 'agent-sigma-001'").get();
+    // Insert Sigma as first Manager Agent (if not exists by id OR handle)
+    const sigmaExists = this.db.prepare("SELECT id FROM manager_agents WHERE id = 'agent-sigma-001' OR handle = '@sigma'").get();
     if (!sigmaExists) {
       this.db.prepare(`
         INSERT INTO manager_agents (id, name, handle, role, status, skills, is_approved, approved_by, approved_at)

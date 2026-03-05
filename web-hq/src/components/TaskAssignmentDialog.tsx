@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react';
 import { X, Bot, AlertCircle, CheckCircle2, Clock, Zap, UserCheck, Loader2 } from 'lucide-react';
-import { tasksApi, agentsApi, type Agent } from '../services/api';
+import { tasksApi, agentsApi, fetchApi, type Agent } from '../services/api';
 
 interface TaskAssignmentDialogProps {
   taskId: string;
@@ -31,17 +31,25 @@ export default function TaskAssignmentDialog({ taskId, taskTitle, onClose, onAss
     try {
       setFetchingAgents(true);
       const response = await agentsApi.list({ status: 'online' });
-      
-      // Enhance agents with mock availability data for now
-      // In production, this would come from the API
-      const enhancedAgents = (response.agents || []).map((agent: Agent) => ({
-        ...agent,
-        availability: agent.status === 'online' ? 'available' : 
-                     agent.status === 'working' ? 'busy' : 'offline',
-        currentTasks: Math.floor(Math.random() * 5), // Mock data
-      }));
-      
-      setAgents(enhancedAgents);
+      const agentList: Agent[] = response.agents || [];
+
+      // Fetch real task counts for each agent in parallel
+      const withTasks = await Promise.all(
+        agentList.map(async (agent: Agent) => {
+          let currentTasks = 0;
+          try {
+            const taskData = await fetchApi(`/api/agents/${agent.id}/tasks?status=running&limit=50`);
+            currentTasks = (taskData.tasks || []).length;
+          } catch { }
+          return {
+            ...agent,
+            availability: agent.status === 'online' ? 'available' :
+              agent.status === 'working' ? 'busy' : 'offline',
+            currentTasks,
+          };
+        })
+      );
+      setAgents(withTasks);
     } catch (err: any) {
       setError('Failed to load agents: ' + err.message);
     } finally {
@@ -63,7 +71,7 @@ export default function TaskAssignmentDialog({ taskId, taskTitle, onClose, onAss
       for (const agentId of selectedAgentIds) {
         await tasksApi.assign(taskId, agentId, message.trim() || undefined);
       }
-      
+
       onAssigned();
       onClose();
     } catch (err: any) {
@@ -74,7 +82,7 @@ export default function TaskAssignmentDialog({ taskId, taskTitle, onClose, onAss
   };
 
   const toggleAgentSelection = (agentId: string) => {
-    setSelectedAgentIds(prev => 
+    setSelectedAgentIds(prev =>
       prev.includes(agentId)
         ? prev.filter(id => id !== agentId)
         : [...prev, agentId]
@@ -128,7 +136,7 @@ export default function TaskAssignmentDialog({ taskId, taskTitle, onClose, onAss
               Select Agents <span className="text-red-400">*</span>
               <span className="text-slate-500 text-xs ml-2">({selectedAgentIds.length} selected)</span>
             </label>
-            
+
             {fetchingAgents ? (
               <div className="flex items-center justify-center py-8">
                 <span className="w-6 h-6 border-2 border-primary/30 border-t-primary rounded-full animate-spin" />
@@ -145,18 +153,16 @@ export default function TaskAssignmentDialog({ taskId, taskTitle, onClose, onAss
                     key={agent.id}
                     type="button"
                     onClick={() => toggleAgentSelection(agent.id)}
-                    className={`w-full flex items-center gap-3 p-3 rounded-lg border transition-all text-left ${
-                      selectedAgentIds.includes(agent.id)
+                    className={`w-full flex items-center gap-3 p-3 rounded-lg border transition-all text-left ${selectedAgentIds.includes(agent.id)
                         ? 'bg-primary/10 border-primary/50 ring-1 ring-primary'
                         : 'bg-slate-800 border-slate-700 hover:bg-slate-700/50'
-                    }`}
+                      }`}
                   >
                     {/* Selection Checkbox */}
-                    <div className={`w-5 h-5 rounded border flex items-center justify-center transition-colors ${
-                      selectedAgentIds.includes(agent.id)
+                    <div className={`w-5 h-5 rounded border flex items-center justify-center transition-colors ${selectedAgentIds.includes(agent.id)
                         ? 'bg-primary border-primary'
                         : 'border-slate-500'
-                    }`}>
+                      }`}>
                       {selectedAgentIds.includes(agent.id) && (
                         <CheckCircle2 className="w-3.5 h-3.5 text-white" />
                       )}
@@ -182,7 +188,7 @@ export default function TaskAssignmentDialog({ taskId, taskTitle, onClose, onAss
                           {getAvailabilityLabel(agent.availability)}
                         </span>
                       </div>
-                      
+
                       {/* Skills */}
                       {agent.skills && agent.skills.length > 0 && (
                         <div className="flex flex-wrap gap-1 mt-1.5">
@@ -219,8 +225,8 @@ export default function TaskAssignmentDialog({ taskId, taskTitle, onClose, onAss
                 <UserCheck className="w-4 h-4" />
                 <span>
                   Will assign to <strong className="text-indigo-200">
-                    {selectedAgentIds.length === 1 
-                      ? agents.find(a => a.id === selectedAgentIds[0])?.name 
+                    {selectedAgentIds.length === 1
+                      ? agents.find(a => a.id === selectedAgentIds[0])?.name
                       : `${selectedAgentIds.length} agents`
                     }
                   </strong>
