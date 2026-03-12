@@ -128,7 +128,7 @@ export default function Agents() {
               const sc = STATUS_COLOR[a.status] || 'var(--text-lo)';
               const initials = a.name.split(' ').map((w: string) => w[0]).join('').slice(0, 2).toUpperCase();
               return (
-                <div key={a.id} className="ops-panel" style={{ padding: '16px 18px' }}>
+                <div key={a.id} className="ops-panel" style={{ padding: '16px 18px', cursor: 'pointer' }} onClick={() => navigate(`/agents/${a.id}`)}>
                   <div className="flex items-start gap-3 mb-3">
                     <div style={{ width: 38, height: 38, borderRadius: 2, background: 'linear-gradient(135deg,var(--amber-dark),var(--amber))', display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0, ...mono, fontSize: 13, fontWeight: 700, color: '#000' }}>
                       {initials}
@@ -154,10 +154,10 @@ export default function Agents() {
                   )}
 
                   <div className="flex gap-2 pt-3" style={{ borderTop: '1px solid var(--ink-4)' }}>
-                    <button onClick={() => navigate(`/chat?agent=${a.id}`)} className="ops-btn flex-1 flex items-center justify-center gap-1">
+                    <button onClick={e => { e.stopPropagation(); navigate(`/chat?agent=${a.id}`); }} className="ops-btn flex-1 flex items-center justify-center gap-1">
                       <MessageSquare size={10} /> Message
                     </button>
-                    <button onClick={() => navigate(`/projects?assign=${a.id}`)} className="ops-btn flex-1 flex items-center justify-center gap-1">
+                    <button onClick={e => { e.stopPropagation(); navigate(`/projects?assign=${a.id}`); }} className="ops-btn flex-1 flex items-center justify-center gap-1">
                       <UserPlus2 size={10} /> Assign
                     </button>
                   </div>

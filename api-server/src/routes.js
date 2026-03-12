@@ -2486,34 +2486,61 @@ async function listAgents(request, reply) {
   };
 }
 
-// GET /api/agents/:id - Get agent details
+// GET /api/agents/:id - Get agent details (uses manager_agents)
 async function getAgent(request, reply) {
   const db = getDb();
   const { id } = request.params;
 
-  const agent = db.prepare('SELECT * FROM agents WHERE id = ?').get(id);
+  const agent = db.prepare('SELECT * FROM manager_agents WHERE id = ?').get(id);
 
   if (!agent) {
     reply.code(404);
     return { error: 'Agent not found' };
   }
 
-  // Get recent messages
-  const messages = db.prepare(`
-    SELECT * FROM messages
-    WHERE agent_id = ?
-    ORDER BY created_at DESC
-    LIMIT 10
+  // Task stats
+  const stats = db.prepare(`
+    SELECT
+      COUNT(*) as total,
+      SUM(CASE WHEN status = 'pending'   THEN 1 ELSE 0 END) as pending,
+      SUM(CASE WHEN status = 'running'   THEN 1 ELSE 0 END) as running,
+      SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) as completed,
+      SUM(CASE WHEN status = 'failed'    THEN 1 ELSE 0 END) as failed
+    FROM tasks WHERE agent_id = ?
+  `).get(id);
+
+  // Recent tasks (last 10)
+  const recentTasks = db.prepare(`
+    SELECT t.id, t.title, t.status, t.priority, t.created_at, t.updated_at,
+           p.name as project_name
+    FROM tasks t
+    JOIN projects p ON t.project_id = p.id
+    WHERE t.agent_id = ?
+    ORDER BY t.created_at DESC LIMIT 10
+  `).all(id);
+
+  // Active projects
+  const projects = db.prepare(`
+    SELECT p.id, p.name, p.status, ap.role, ap.assigned_at
+    FROM agent_projects ap
+    JOIN projects p ON ap.project_id = p.id
+    WHERE ap.agent_id = ? AND ap.status = 'active'
+    ORDER BY ap.assigned_at DESC
   `).all(id);
 
   return {
-    ...formatAgentResponse(agent),
-    config: JSON.parse(agent.config || '{}'),
-    personality: agent.personality ? JSON.parse(agent.personality) : null,
-    recent_messages: messages.map(m => ({
-      ...m,
-      metadata: JSON.parse(m.metadata || '{}')
-    }))
+    ...agent,
+    skills: JSON.parse(agent.skills || '[]'),
+    specialties: JSON.parse(agent.specialties || '[]'),
+    task_stats: {
+      total:     stats.total     || 0,
+      pending:   stats.pending   || 0,
+      running:   stats.running   || 0,
+      completed: stats.completed || 0,
+      failed:    stats.failed    || 0,
+    },
+    recent_tasks: recentTasks,
+    projects,
   };
 }
 
@@ -3265,12 +3292,34 @@ async function getManagerAgentRoute(request, reply) {
   const isAdmin = user?.role === 'admin';
   const isSelf = user?.id === id;
 
-  // Get assigned projects
+  // Get assigned projects (active only)
   const projects = db.prepare(`
-    SELECT ap.*, p.name as project_name
+    SELECT p.id, p.name, p.status, ap.role, ap.assigned_at
     FROM agent_projects ap
     JOIN projects p ON ap.project_id = p.id
-    WHERE ap.agent_id = ?
+    WHERE ap.agent_id = ? AND ap.status = 'active'
+    ORDER BY ap.assigned_at DESC
+  `).all(id);
+
+  // Task stats
+  const taskStats = db.prepare(`
+    SELECT
+      COUNT(*) as total,
+      SUM(CASE WHEN status = 'pending'   THEN 1 ELSE 0 END) as pending,
+      SUM(CASE WHEN status = 'running'   THEN 1 ELSE 0 END) as running,
+      SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) as completed,
+      SUM(CASE WHEN status = 'failed'    THEN 1 ELSE 0 END) as failed
+    FROM tasks WHERE agent_id = ?
+  `).get(id);
+
+  // Recent tasks (last 10)
+  const recentTasks = db.prepare(`
+    SELECT t.id, t.title, t.status, t.priority, t.created_at, t.updated_at,
+           p.name as project_name
+    FROM tasks t
+    JOIN projects p ON t.project_id = p.id
+    WHERE t.agent_id = ?
+    ORDER BY t.created_at DESC LIMIT 10
   `).all(id);
 
   // Get unread notifications count
@@ -3286,16 +3335,16 @@ async function getManagerAgentRoute(request, reply) {
 
   return {
     ...formattedAgent,
-    projects: projects.map(p => ({
-      id: p.project_id,
-      name: p.project_name,
-      role: p.role,
-      status: p.status,
-      assigned_at: p.assigned_at
-    })),
-    notifications: {
-      unread_count
-    }
+    projects,
+    task_stats: {
+      total:     taskStats.total     || 0,
+      pending:   taskStats.pending   || 0,
+      running:   taskStats.running   || 0,
+      completed: taskStats.completed || 0,
+      failed:    taskStats.failed    || 0,
+    },
+    recent_tasks: recentTasks,
+    notifications: { unread_count },
   };
 }
 
