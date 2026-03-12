@@ -43,8 +43,8 @@ export default function Agents() {
   const reject = async (id: string) => { try { await adminApi.rejectAgent(id); fetch(); } catch { } };
 
   const filtered = agents.filter(a =>
-    a.name.toLowerCase().includes(search.toLowerCase()) ||
-    a.handle.toLowerCase().includes(search.toLowerCase()) ||
+    (a.name ?? '').toLowerCase().includes(search.toLowerCase()) ||
+    (a.handle ?? '').toLowerCase().includes(search.toLowerCase()) ||
     a.skills?.some((s: string) => s.toLowerCase().includes(search.toLowerCase()))
   );
 
