@@ -360,6 +360,20 @@ async function main() {
     if (onlineRes.status === 200) log('INIT', '✅ Status set to ONLINE', C.G);
     else log('INIT', `Status update: ${JSON.stringify(onlineRes.body)}`, C.Y);
 
+    // ── Step 3b: Load own DM channels ─────────────────────────────────────────
+    const myDMChannels = new Set();
+    try {
+        const chRes = await req('GET', '/api/channels', null, userToken);
+        for (const ch of (chRes.body?.channels || [])) {
+            if (ch.type === 'dm' && ch.dm_agent_id === agentId) {
+                myDMChannels.add(ch.id);
+            }
+        }
+        log('CHAT', `Loaded ${myDMChannels.size} DM channel(s)`, C.G);
+    } catch (e) {
+        log('CHAT', `Could not load DM channels: ${e.message}`, C.Y);
+    }
+
     // ── Step 4: WebSocket ──────────────────────────────────────────────────────
     const activeTasks = new Set();
     const repliedMessages = new Set();       // dedupe by message ID
@@ -415,7 +429,7 @@ async function main() {
             if (data?.content) {
                 const sender = data?.sender_name || '?';
                 const channelId = data?.channel_id;
-                const isDM = data?.channel_type === 'dm';
+                const isDM = myDMChannels.has(channelId);
                 const mentioned = isMentioned(data.content);
 
                 log('MSG', `💬 [#${data?.channel_name || channelId}] ${sender}: ${data.content}`, C.C);
@@ -423,7 +437,7 @@ async function main() {
                 if (msgId) repliedMessages.add(msgId);
                 if (repliedMessages.size > 500) repliedMessages.clear();
 
-                // Reply in DMs and @mentions
+                // Reply only in this agent's DMs or when @mentioned
                 if ((isDM || mentioned) && channelId) {
                     const now = Date.now();
                     const lastReply = channelCooldown.get(channelId) || 0;
