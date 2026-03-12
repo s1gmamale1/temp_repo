@@ -6,6 +6,7 @@ import {
 import { useNavigate } from 'react-router-dom';
 import { useNotificationStore } from '../store/notificationStore';
 import type { Notification } from '../store/notificationStore';
+import { userSession } from '../services/api';
 
 export type { Notification };
 
@@ -19,7 +20,7 @@ export default function NotificationCenter() {
     fetchNotifications, markRead, markAllRead, dismiss,
   } = useNotificationStore();
 
-  useEffect(() => { fetchNotifications(); }, [fetchNotifications]);
+  useEffect(() => { if (userSession.isLoggedIn()) fetchNotifications(); }, [fetchNotifications]);
 
   // Close on outside click
   useEffect(() => {
