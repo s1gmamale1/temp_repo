@@ -416,7 +416,6 @@ async function main() {
         }
 
         if (ev === 'chat:channel_created') {
-            log('CHAT', `channel_created: type=${data?.type} dm_agent_id=${data?.dm_agent_id} agentId=${agentId} match=${data?.dm_agent_id === agentId}`, C.Y);
             if (data?.type === 'dm' && data?.dm_agent_id === agentId && data?.channel_id) {
                 myDMChannels.add(data.channel_id);
                 log('CHAT', `New DM channel registered: ${data.channel_id}`, C.G);
@@ -445,7 +444,6 @@ async function main() {
                 const mentioned = isMentioned(data.content);
 
                 log('MSG', `💬 [#${data?.channel_name || channelId}] ${sender}: ${data.content}`, C.C);
-                log('DBG', `ch_type=${data?.channel_type} dm_recip=${data?.dm_recipient_id} agentId=${agentId} isDM=${isDM} mentioned=${mentioned} myDMChannels=[${[...myDMChannels].join(',')}]`, C.Y);
 
                 if (msgId) repliedMessages.add(msgId);
                 if (repliedMessages.size > 500) repliedMessages.clear();
