@@ -19,11 +19,7 @@ export async function fetchApi(endpoint: string, options?: RequestInit) {
   // Add auth header if token exists
   if (token) {
     headers['Authorization'] = `Bearer ${token}`;
-  } else {
-    console.warn(`[fetchApi] No auth token found for ${endpoint}`);
   }
-
-  console.log(`[fetchApi] ${options?.method || 'GET'} ${url} - Auth: ${token ? 'present' : 'missing'}`);
 
   const response = await fetch(url, {
     ...options,
