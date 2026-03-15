@@ -25,7 +25,9 @@ function parseCorsOrigins() {
         'http://127.0.0.1:3000'
       ];
     }
-    return ['*']; // Production should explicitly set CORS_ORIGIN
+    // In production, if no CORS_ORIGIN set, only allow same-origin
+    console.warn('⚠️  CORS_ORIGIN not set in production. Defaulting to localhost origins only.');
+    return ['http://localhost:3001', 'http://localhost:5173', 'http://localhost:80'];
   }
 
   return origins.split(',').map(o => o.trim()).filter(Boolean);
@@ -57,7 +59,7 @@ function getDatabaseConfig() {
 // Rate limiting configuration
 function getRateLimitConfig() {
   return {
-    max: parseInt(process.env.RATE_LIMIT_MAX || '10000'),
+    max: parseInt(process.env.RATE_LIMIT_MAX || '200'),
     window: process.env.RATE_LIMIT_WINDOW || '1 minute'
   };
 }

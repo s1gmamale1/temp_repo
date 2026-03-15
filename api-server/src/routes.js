@@ -1948,7 +1948,7 @@ async function getChannelMessagesByIdRoute(request, reply) {
   // Mark channel as read for this user
   const userId = request.user?.id;
   if (userId) {
-    try { db.updateLastRead(channel.id, userId); } catch (e) { }
+    try { db.updateLastRead(channel.id, userId); } catch (e) { /* non-critical */ }
   }
 
   return {
@@ -2101,16 +2101,16 @@ async function createOrGetDmRoute(request, reply) {
       INSERT OR IGNORE INTO channel_members (id, channel_id, user_id, joined_at) 
       VALUES (?, ?, ?, ?)
     `).run(generateId(), id, currentUserId, now);
-  } catch (e) { }
+  } catch (e) { /* non-critical: INSERT OR IGNORE handles duplicates */ }
 
   // Add other user as member (if not agent)
   if (!agent_id) {
     try {
       db.prepare(`
-        INSERT OR IGNORE INTO channel_members (id, channel_id, user_id, joined_at) 
+        INSERT OR IGNORE INTO channel_members (id, channel_id, user_id, joined_at)
         VALUES (?, ?, ?, ?)
       `).run(generateId(), id, userId, now);
-    } catch (e) { }
+    } catch (e) { /* non-critical: INSERT OR IGNORE handles duplicates */ }
   }
 
   // Return created channel with agent info
@@ -2175,7 +2175,7 @@ async function createProjectChannelRoute(request, reply) {
   `).run(id, channelName, projectId, userId, now);
 
   // Add creator as owner
-  try { db.prepare(`INSERT OR IGNORE INTO channel_members (id, channel_id, user_id, joined_at) VALUES (?, ?, ?, ?)`).run(generateId(), id, userId, now); } catch (e) { }
+  try { db.prepare(`INSERT OR IGNORE INTO channel_members (id, channel_id, user_id, joined_at) VALUES (?, ?, ?, ?)`).run(generateId(), id, userId, now); } catch (e) { /* non-critical */ }
 
   reply.code(201);
   return {
@@ -3954,7 +3954,7 @@ async function registerMachineRoute(request, reply) {
       try {
         db.prepare('INSERT OR IGNORE INTO machine_agents (id, machine_id, agent_id, started_at, status) VALUES (?, ?, ?, ?, ?)')
           .run(generateId(), machineId, agent_id, now, 'running');
-      } catch (e) { }
+      } catch (e) { console.error('machine_agents link failed:', e.message); }
     }
     reply.code(existing ? 200 : 201);
     return { id: machineId, hostname, ip_address: ip, status: 'active', last_seen: now, created: !existing };
@@ -3977,7 +3977,7 @@ async function listMachinesRoute(request, reply) {
           LEFT JOIN manager_agents mg ON ma.agent_id = mg.id
           WHERE ma.machine_id = ? AND ma.status = 'running'
         `).all(m.id);
-      } catch (e) { }
+      } catch (e) { console.error('machine agents query failed:', e.message); }
       return { ...m, metadata: JSON.parse(m.metadata || '{}'), agents };
     });
 
@@ -4357,7 +4357,7 @@ async function getTokensLiveRoute(request, reply) {
 
     let kimiBalance = null;
     if (process.env.MOONSHOT_API_KEY) {
-      try { kimiBalance = await getKimiLiveBalance(); } catch (e) { }
+      try { kimiBalance = await getKimiLiveBalance(); } catch (e) { /* non-critical: external API may be unavailable */ }
     }
 
     const agentRows = db.prepare(`

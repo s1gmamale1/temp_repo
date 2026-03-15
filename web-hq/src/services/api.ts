@@ -21,10 +21,33 @@ export async function fetchApi(endpoint: string, options?: RequestInit) {
     headers['Authorization'] = `Bearer ${token}`;
   }
 
-  const response = await fetch(url, {
-    ...options,
-    headers,
-  });
+  // Request timeout (30 seconds)
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 30000);
+
+  let response: Response;
+  try {
+    response = await fetch(url, {
+      ...options,
+      headers,
+      signal: controller.signal,
+    });
+  } catch (err: any) {
+    clearTimeout(timeout);
+    if (err.name === 'AbortError') {
+      const msg = 'Request timed out. Please try again.';
+      window.dispatchEvent(new CustomEvent('api-error', { detail: { message: msg } }));
+      throw new Error(msg);
+    }
+    if (err instanceof TypeError && err.message === 'Failed to fetch') {
+      const msg = 'Unable to connect to server. Please check your connection.';
+      window.dispatchEvent(new CustomEvent('api-error', { detail: { message: msg } }));
+      throw new Error(msg);
+    }
+    throw err;
+  } finally {
+    clearTimeout(timeout);
+  }
 
   if (!response.ok) {
     const errorText = await response.text();
@@ -35,6 +58,12 @@ export async function fetchApi(endpoint: string, options?: RequestInit) {
       error = { error: errorText || `HTTP ${response.status}` };
     }
     console.error(`[fetchApi] Error ${response.status} for ${endpoint}:`, error);
+
+    // Dispatch a global event for toast notifications
+    window.dispatchEvent(new CustomEvent('api-error', {
+      detail: { message: error.error || `HTTP ${response.status}`, status: response.status }
+    }));
+
     throw new Error(error.error || `HTTP ${response.status}`);
   }
 

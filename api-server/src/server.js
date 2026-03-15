@@ -11,6 +11,7 @@ const fastify = require('fastify')({
 });
 
 const cors = require('@fastify/cors');
+const helmet = require('@fastify/helmet');
 const websocket = require('@fastify/websocket');
 const rateLimit = require('@fastify/rate-limit');
 const { initDatabase, getDb } = require('./database');
@@ -18,6 +19,7 @@ const wsManager = require('./websocket');
 const routes = require('./routes');
 const { optionalAuthMiddleware, authMiddleware } = require('./auth');
 const config = require('./config');
+const { safeError, logError } = require('./errors');
 const {
   validate,
   createProjectSchema,
@@ -52,6 +54,13 @@ async function buildServer() {
   const { syncPresetsToDb } = require('./presets');
   const synced = syncPresetsToDb();
   if (synced > 0) fastify.log.info(`Synced ${synced} presets to database`);
+
+  // Register security headers (Helmet)
+  await fastify.register(helmet, {
+    contentSecurityPolicy: false, // Don't block frontend assets
+    crossOriginEmbedderPolicy: false,
+    crossOriginResourcePolicy: { policy: 'cross-origin' },
+  });
 
   // Register rate limiting
   await fastify.register(rateLimit, {
@@ -93,6 +102,22 @@ async function buildServer() {
     credentials: true,
     methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
     allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With']
+  });
+
+  // Attach request ID to all responses
+  fastify.addHook('onSend', async (request, reply) => {
+    reply.header('X-Request-Id', request.id);
+  });
+
+  // Global error handler — sanitize errors in production
+  fastify.setErrorHandler(function (error, request, reply) {
+    logError('unhandled', error, request);
+
+    const statusCode = error.statusCode || 500;
+    reply.code(statusCode).send({
+      error: statusCode === 400 ? error.message : safeError(error).error,
+      requestId: request.id
+    });
   });
 
   // Register WebSocket
@@ -511,7 +536,7 @@ async function buildServer() {
         const { getUserByToken } = require('./auth');
         const wsUser = await getUserByToken(token);
         if (wsUser) userId = wsUser.id;
-      } catch (e) { }
+      } catch (e) { /* non-critical: unauthenticated WS connection */ }
     }
 
     // Register client — userId is now guaranteed to be set

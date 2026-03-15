@@ -10,6 +10,7 @@ import TaskDetail from './pages/TaskDetail';
 import Costs from './pages/Costs';
 import TokenDashboard from './pages/TokenDashboard';
 import { ToastContainer, toast } from './components/Toast';
+import ErrorBoundary from './components/ErrorBoundary';
 import NewProject from './pages/NewProject';
 import Activity from './pages/Activity';
 import Settings from './pages/Settings';
@@ -160,24 +161,40 @@ function App() {
     );
   }
 
+  // Listen for global API error events and show toast notifications
+  useEffect(() => {
+    const handler = (e: Event) => {
+      const detail = (e as CustomEvent).detail;
+      if (detail?.message) {
+        toast.error('API Error', detail.message);
+      }
+    };
+    window.addEventListener('api-error', handler);
+    return () => window.removeEventListener('api-error', handler);
+  }, []);
+
   // Not logged in - show auth routes
   if (!user) {
     return (
-      <BrowserRouter>
-        <Routes>
-          <Route path="/login" element={<Login onLogin={handleLogin} />} />
-          <Route path="/register" element={<Register />} />
-          <Route path="*" element={<Navigate to="/login" replace />} />
-        </Routes>
-      </BrowserRouter>
+      <ErrorBoundary>
+        <BrowserRouter>
+          <ToastContainer />
+          <Routes>
+            <Route path="/login" element={<Login onLogin={handleLogin} />} />
+            <Route path="/register" element={<Register />} />
+            <Route path="*" element={<Navigate to="/login" replace />} />
+          </Routes>
+        </BrowserRouter>
+      </ErrorBoundary>
     );
   }
 
   return (
-    <BrowserRouter>
-      {/* WebSocket manager - persists connection across route changes */}
-      <ToastContainer />
-      <WebSocketManager userId={user.id} />
+    <ErrorBoundary>
+      <BrowserRouter>
+        {/* WebSocket manager - persists connection across route changes */}
+        <ToastContainer />
+        <WebSocketManager userId={user.id} />
 
       <Layout user={user} onLogout={handleLogout}>
         <Routes>
@@ -217,7 +234,8 @@ function App() {
           <Route path="*" element={<Navigate to="/" />} />
         </Routes>
       </Layout>
-    </BrowserRouter>
+      </BrowserRouter>
+    </ErrorBoundary>
   );
 }
 

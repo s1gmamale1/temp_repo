@@ -75,7 +75,7 @@ describe('API Service', () => {
 
       const { fetchApi } = await import('./api');
 
-      await expect(fetchApi('/api/test')).rejects.toThrow('Failed to fetch');
+      await expect(fetchApi('/api/test')).rejects.toThrow('Unable to connect to server');
     });
   });
 
