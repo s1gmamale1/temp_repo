@@ -9,7 +9,8 @@ import {
   Bot, Zap, RefreshCw, Loader2, MessageSquare, X,
   ChevronRight, Cpu, Activity, Radio, CheckCircle, Clock, AlertCircle
 } from 'lucide-react';
-import { agentsApi, projectsApi, fetchApi, wsClient } from '../services/api';
+import { agentsApi, projectsApi, fetchApi, wsClient, presetsApi } from '../services/api';
+import type { PresetsResponse } from '../services/api';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -246,10 +247,11 @@ function DroppableZone({ id, children, label, color = 'var(--cyan)' }: {
 
 // ─── Assignment Modal ─────────────────────────────────────────────────────────
 
-function AssignModal({ agent, project, onConfirm, onCancel }: {
+function AssignModal({ agent, project, onConfirm, onCancel, presets }: {
   agent: Agent; project: Project;
   onConfirm: (dept: string, model: string) => void;
   onCancel: () => void;
+  presets: PresetsResponse | null;
 }) {
   const [dept, setDept] = useState('');
   const [model, setModel] = useState('claude-sonnet-4-6');
@@ -288,39 +290,50 @@ function AssignModal({ agent, project, onConfirm, onCancel }: {
           <>
             <div style={{ fontFamily: 'var(--font-mono)', fontSize: 10, color: 'var(--amber)', letterSpacing: '0.1em', marginBottom: 10 }}>SELECT PROJECT MODE</div>
             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(5, 1fr)', gap: 6, marginBottom: 20 }}>
-              {Object.entries(PM_MODES).map(([id, { icon, label }]) => (
-                <button key={id} onClick={() => setDept(id)} style={{
-                  background: dept === id ? 'rgba(245,158,11,0.12)' : 'var(--ink-3)',
-                  border: `1px solid ${dept === id ? 'rgba(245,158,11,0.4)' : 'var(--ink-4)'}`,
-                  borderRadius: 4, padding: '8px 4px', cursor: 'pointer',
-                  display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 4,
-                  color: dept === id ? '#f59e0b' : 'var(--text-mid)',
-                  transition: 'all 120ms',
-                }}>
-                  <span style={{ fontSize: 16 }}>{icon}</span>
-                  <span style={{ fontFamily: 'var(--font-mono)', fontSize: 8 }}>{label}</span>
-                </button>
-              ))}
+              {(presets?.pm_modes || Object.entries(PM_MODES).map(([id, m]) => ({ name: id, title: m.label, description: '', type: 'pm_modes' }))).map(mode => {
+                const pmMeta = PM_MODES[mode.name];
+                const icon = pmMeta?.icon || '📋';
+                const label = mode.title || pmMeta?.label || mode.name;
+                return (
+                  <button key={mode.name} onClick={() => setDept(mode.name)} style={{
+                    background: dept === mode.name ? 'rgba(245,158,11,0.12)' : 'var(--ink-3)',
+                    border: `1px solid ${dept === mode.name ? 'rgba(245,158,11,0.4)' : 'var(--ink-4)'}`,
+                    borderRadius: 4, padding: '8px 4px', cursor: 'pointer',
+                    display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 4,
+                    color: dept === mode.name ? '#f59e0b' : 'var(--text-mid)',
+                    transition: 'all 120ms',
+                  }}>
+                    <span style={{ fontSize: 16 }}>{icon}</span>
+                    <span style={{ fontFamily: 'var(--font-mono)', fontSize: 8 }}>{label}</span>
+                  </button>
+                );
+              })}
             </div>
           </>
         ) : (
           <>
             <div style={{ fontFamily: 'var(--font-mono)', fontSize: 10, color: 'var(--blue)', letterSpacing: '0.1em', marginBottom: 10 }}>SELECT DEPARTMENT</div>
             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(7, 1fr)', gap: 5, marginBottom: 20 }}>
-              {Object.entries(DEPT_META).map(([id, { color, icon, short }]) => (
-                <button key={id} onClick={() => setDept(id)} style={{
-                  background: dept === id ? `${color}15` : 'var(--ink-3)',
-                  border: `1px solid ${dept === id ? `${color}50` : 'var(--ink-4)'}`,
-                  borderRadius: 4, padding: '7px 3px', cursor: 'pointer',
-                  display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 3,
-                  color: dept === id ? color : 'var(--text-lo)',
-                  transition: 'all 120ms',
-                  boxShadow: dept === id ? `0 0 10px ${color}20` : 'none',
-                }}>
-                  <span style={{ fontSize: 13, color: dept === id ? color : 'var(--text-lo)' }}>{icon}</span>
-                  <span style={{ fontFamily: 'var(--font-mono)', fontSize: 7 }}>{short}</span>
-                </button>
-              ))}
+              {(presets?.departments || Object.entries(DEPT_META).map(([id, d]) => ({ name: id, title: d.short, description: '', type: 'departments' }))).map(deptItem => {
+                const deptMeta = DEPT_META[deptItem.name];
+                const color = deptMeta?.color || '#3b82f6';
+                const icon = deptMeta?.icon || '◧';
+                const short = deptMeta?.short || deptItem.title || deptItem.name.slice(0, 2).toUpperCase();
+                return (
+                  <button key={deptItem.name} onClick={() => setDept(deptItem.name)} style={{
+                    background: dept === deptItem.name ? `${color}15` : 'var(--ink-3)',
+                    border: `1px solid ${dept === deptItem.name ? `${color}50` : 'var(--ink-4)'}`,
+                    borderRadius: 4, padding: '7px 3px', cursor: 'pointer',
+                    display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 3,
+                    color: dept === deptItem.name ? color : 'var(--text-lo)',
+                    transition: 'all 120ms',
+                    boxShadow: dept === deptItem.name ? `0 0 10px ${color}20` : 'none',
+                  }}>
+                    <span style={{ fontSize: 13, color: dept === deptItem.name ? color : 'var(--text-lo)' }}>{icon}</span>
+                    <span style={{ fontFamily: 'var(--font-mono)', fontSize: 7 }}>{short}</span>
+                  </button>
+                );
+              })}
             </div>
           </>
         )}
@@ -370,6 +383,7 @@ export default function HQ() {
   const [filter, setFilter] = useState<'all' | 'pm' | 'worker' | 'rnd'>('all');
   const [activity, setActivity] = useState<ActivityItem[]>([]);
   const [confirmUnload, setConfirmUnload] = useState<Agent | null>(null);
+  const [presets, setPresets] = useState<PresetsResponse | null>(null);
 
   const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 6 } }));
 
@@ -401,6 +415,11 @@ export default function HQ() {
   }, []);
 
   useEffect(() => { load(); }, [load]);
+
+  // Load presets for dynamic department/mode/division info
+  useEffect(() => {
+    presetsApi.list().then(setPresets).catch(() => { /* presets are optional */ });
+  }, []);
 
   // WS: live activity feed + agent refresh
   useEffect(() => {
@@ -863,6 +882,7 @@ export default function HQ() {
           project={modal.project}
           onConfirm={handleAssign}
           onCancel={() => setModal(null)}
+          presets={presets}
         />
       )}
 

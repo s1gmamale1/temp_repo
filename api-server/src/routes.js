@@ -2970,25 +2970,10 @@ async function assignAgentToProjectRouteV2(request, reply) {
     let generatedTasks = [];
     if (agent.agent_type === 'pm' && agent.current_mode) {
       try {
-        const path = require('path');
-        const fs = require('fs');
-        const presetPath = path.join(__dirname, `${agent.current_mode}.md`);
-        if (fs.existsSync(presetPath)) {
-          const content = fs.readFileSync(presetPath, 'utf8');
-          // Extract lines under "## Task Breakdown Template"
-          const lines = content.split('\n');
-          let inSection = false;
-          const taskLines = [];
-          for (const line of lines) {
-            if (line.startsWith('## Task Breakdown Template')) { inSection = true; continue; }
-            if (inSection && line.startsWith('## ')) break; // next section
-            if (inSection) taskLines.push(line);
-          }
-          // Parse numbered items: "1. Task title (details)" → "Task title (details)"
-          const taskTitles = taskLines
-            .map(l => l.match(/^\d+\.\s+(.+)/))
-            .filter(Boolean)
-            .map(m => m[1].trim());
+        const presetsModule = require('./presets');
+        const presetContent = presetsModule.loadPresetFile('pm_mode', agent.current_mode);
+        if (presetContent) {
+          const taskTitles = presetsModule.extractTaskBreakdown(presetContent);
 
           for (let i = 0; i < taskTitles.length; i++) {
             const taskId = generateId();
@@ -3460,6 +3445,21 @@ async function registerManagerAgentRoute(request, reply) {
     return { error: 'Handle already taken' };
   }
 
+  // Validate preset references
+  const presetsModule = require('./presets');
+  if (agent_type === 'pm' && current_mode && !presetsModule.validatePreset('pm_mode', current_mode)) {
+    reply.code(400);
+    return { error: `Invalid PM mode preset: ${current_mode}` };
+  }
+  if (agent_type === 'rnd' && rnd_division && !presetsModule.validatePreset('rnd_division', rnd_division)) {
+    reply.code(400);
+    return { error: `Invalid R&D division preset: ${rnd_division}` };
+  }
+  if (agent_type === 'worker' && current_mode && !presetsModule.validatePreset('worker_dept', current_mode)) {
+    reply.code(400);
+    return { error: `Invalid worker department preset: ${current_mode}` };
+  }
+
   const id = generateId();
   const now = new Date().toISOString();
 
@@ -3708,6 +3708,24 @@ async function patchManagerAgentRoute(request, reply) {
   if (Object.keys(updates).length === 0) {
     reply.code(400);
     return { error: 'No valid fields to update' };
+  }
+
+  // Validate preset references when updating
+  const presetsModule = require('./presets');
+  const effectiveType = updates.agent_type || agent.agent_type;
+  if (updates.current_mode !== undefined) {
+    if (effectiveType === 'pm' && updates.current_mode && !presetsModule.validatePreset('pm_mode', updates.current_mode)) {
+      reply.code(400);
+      return { error: `Invalid PM mode preset: ${updates.current_mode}` };
+    }
+    if (effectiveType === 'worker' && updates.current_mode && !presetsModule.validatePreset('worker_dept', updates.current_mode)) {
+      reply.code(400);
+      return { error: `Invalid worker department preset: ${updates.current_mode}` };
+    }
+  }
+  if (updates.rnd_division !== undefined && updates.rnd_division && !presetsModule.validatePreset('rnd_division', updates.rnd_division)) {
+    reply.code(400);
+    return { error: `Invalid R&D division preset: ${updates.rnd_division}` };
   }
 
   const now = new Date().toISOString();
@@ -4522,6 +4540,51 @@ async function getActivityRoute(request, reply) {
   }
 }
 
+// ============================================================================
+// PRESET ROUTES
+// ============================================================================
+
+// GET /api/presets - List all presets grouped by type
+async function listPresetsRoute(request, reply) {
+  const presets = require('./presets');
+  return presets.listAllPresets();
+}
+
+// GET /api/presets/:type - List presets by type
+async function listPresetsByTypeRoute(request, reply) {
+  const presets = require('./presets');
+  const { type } = request.params;
+
+  const validTypes = ['pm_mode', 'worker_dept', 'rnd_division'];
+  if (!validTypes.includes(type)) {
+    reply.code(400);
+    return { error: `Invalid type. Must be one of: ${validTypes.join(', ')}` };
+  }
+
+  return { type, presets: presets.listPresets(type) };
+}
+
+// GET /api/presets/:type/:name - Get full preset content
+async function getPresetRoute(request, reply) {
+  const presetsModule = require('./presets');
+  const { type, name } = request.params;
+
+  const preset = presetsModule.getPreset(type, name);
+  if (!preset) {
+    reply.code(404);
+    return { error: 'Preset not found' };
+  }
+
+  return preset;
+}
+
+// POST /api/presets/sync - Sync filesystem presets to database
+async function syncPresetsRoute(request, reply) {
+  const presets = require('./presets');
+  const synced = presets.syncPresetsToDb();
+  return { success: true, synced };
+}
+
 module.exports = {
   // Projects
   listProjects,
@@ -4648,6 +4711,12 @@ module.exports = {
 
   // Activity
   getActivityRoute,
+
+  // Presets
+  listPresetsRoute,
+  listPresetsByTypeRoute,
+  getPresetRoute,
+  syncPresetsRoute,
 };
 
 // ============================================================================

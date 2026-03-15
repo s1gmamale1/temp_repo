@@ -1,10 +1,11 @@
 import { useState, useEffect } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
-import { agentsApi, wsClient } from '../services/api';
+import { agentsApi, wsClient, presetsApi } from '../services/api';
+import type { PresetDetail } from '../services/api';
 import {
   Bot, Cpu, Radio, ArrowLeft, Loader2, AlertCircle,
   MessageSquare, CheckCircle, Clock, Play, XCircle,
-  Folder, Calendar, Activity, Zap,
+  Folder, Calendar, Activity, Zap, ChevronDown, ChevronRight, FileText,
 } from 'lucide-react';
 
 // ── Types ────────────────────────────────────────────────────────────────────
@@ -60,6 +61,9 @@ export default function AgentDetail() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [tab, setTab] = useState<'tasks' | 'projects'>('tasks');
+  const [presetOpen, setPresetOpen] = useState(false);
+  const [presetContent, setPresetContent] = useState<PresetDetail | null>(null);
+  const [presetLoading, setPresetLoading] = useState(false);
 
   useEffect(() => {
     if (id) load(id);
@@ -208,6 +212,65 @@ export default function AgentDetail() {
         ))}
       </div>
 
+      {/* Preset Info */}
+      {agent.agent_type === 'pm' && agent.current_mode && (
+        <PresetSection
+          label="PM Mode"
+          type="pm_modes"
+          name={agent.current_mode}
+          color="#f59e0b"
+          open={presetOpen}
+          onToggle={() => {
+            const willOpen = !presetOpen;
+            setPresetOpen(willOpen);
+            if (willOpen && !presetContent) {
+              setPresetLoading(true);
+              presetsApi.get('pm_modes', agent.current_mode!).then(setPresetContent).catch(() => {}).finally(() => setPresetLoading(false));
+            }
+          }}
+          content={presetContent}
+          loading={presetLoading}
+        />
+      )}
+      {agent.agent_type === 'worker' && agent.current_mode && (
+        <PresetSection
+          label="Department"
+          type="departments"
+          name={agent.current_mode}
+          color="#3b82f6"
+          open={presetOpen}
+          onToggle={() => {
+            const willOpen = !presetOpen;
+            setPresetOpen(willOpen);
+            if (willOpen && !presetContent) {
+              setPresetLoading(true);
+              presetsApi.get('departments', agent.current_mode!).then(setPresetContent).catch(() => {}).finally(() => setPresetLoading(false));
+            }
+          }}
+          content={presetContent}
+          loading={presetLoading}
+        />
+      )}
+      {agent.agent_type === 'rnd' && agent.rnd_division && (
+        <PresetSection
+          label="R&D Division"
+          type="rnd_divisions"
+          name={agent.rnd_division}
+          color="#ef4444"
+          open={presetOpen}
+          onToggle={() => {
+            const willOpen = !presetOpen;
+            setPresetOpen(willOpen);
+            if (willOpen && !presetContent) {
+              setPresetLoading(true);
+              presetsApi.get('rnd_divisions', agent.rnd_division!).then(setPresetContent).catch(() => {}).finally(() => setPresetLoading(false));
+            }
+          }}
+          content={presetContent}
+          loading={presetLoading}
+        />
+      )}
+
       {/* Tabs */}
       <div>
         <div className="flex gap-1 mb-3">
@@ -299,6 +362,73 @@ export default function AgentDetail() {
         )}
       </div>
 
+    </div>
+  );
+}
+
+// ── Preset Section ────────────────────────────────────────────────────────────
+
+function PresetSection({ label, type, name, color, open, onToggle, content, loading: isLoading }: {
+  label: string; type: string; name: string; color: string;
+  open: boolean; onToggle: () => void;
+  content: PresetDetail | null; loading: boolean;
+}) {
+  const mono: React.CSSProperties = { fontFamily: 'var(--font-mono)' };
+  return (
+    <div className="ops-panel" style={{ padding: 0, overflow: 'hidden' }}>
+      <button
+        onClick={onToggle}
+        style={{
+          width: '100%', padding: '12px 16px', background: 'none', border: 'none',
+          cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 8,
+          textAlign: 'left',
+        }}
+      >
+        <FileText size={12} style={{ color, flexShrink: 0 }} />
+        <span style={{ ...mono, fontSize: 10, color, letterSpacing: '0.08em', textTransform: 'uppercase' }}>
+          {label}
+        </span>
+        <span style={{ ...mono, fontSize: 10, color: 'var(--text-hi)', fontWeight: 600 }}>
+          {name.replace(/_/g, ' ')}
+        </span>
+        <span style={{ ...mono, fontSize: 9, color: 'var(--text-lo)', marginLeft: 'auto' }}>
+          {open ? 'collapse' : 'view preset'}
+        </span>
+        {open ? <ChevronDown size={12} style={{ color: 'var(--text-lo)' }} /> : <ChevronRight size={12} style={{ color: 'var(--text-lo)' }} />}
+      </button>
+      {open && (
+        <div style={{ borderTop: '1px solid var(--ink-4)', padding: '14px 16px' }}>
+          {isLoading ? (
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '8px 0' }}>
+              <Loader2 size={12} className="animate-spin" style={{ color }} />
+              <span style={{ ...mono, fontSize: 10, color: 'var(--text-lo)' }}>Loading preset...</span>
+            </div>
+          ) : content ? (
+            <div>
+              <div style={{ ...mono, fontSize: 12, fontWeight: 700, color: 'var(--text-hi)', marginBottom: 4 }}>
+                {content.title}
+              </div>
+              {content.description && (
+                <div style={{ ...mono, fontSize: 10, color: 'var(--text-lo)', marginBottom: 12 }}>
+                  {content.description}
+                </div>
+              )}
+              <pre style={{
+                ...mono, fontSize: 10, color: 'var(--text-mid)', lineHeight: 1.7,
+                whiteSpace: 'pre-wrap', wordBreak: 'break-word',
+                background: 'var(--ink-1)', border: '1px solid var(--ink-4)',
+                borderRadius: 4, padding: '12px 14px', maxHeight: 320, overflowY: 'auto',
+              }}>
+                {content.content}
+              </pre>
+            </div>
+          ) : (
+            <div style={{ ...mono, fontSize: 10, color: 'var(--text-lo)', padding: '8px 0' }}>
+              Preset content not available.
+            </div>
+          )}
+        </div>
+      )}
     </div>
   );
 }

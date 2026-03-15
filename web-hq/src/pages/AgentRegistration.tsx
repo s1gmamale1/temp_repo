@@ -1,7 +1,7 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { useNavigate, Link } from 'react-router-dom';
-import { agentsApi } from '../services/api';
-import type { AgentRegistration } from '../services/api';
+import { agentsApi, presetsApi } from '../services/api';
+import type { AgentRegistration, PresetsResponse } from '../services/api';
 import { Loader2, CheckCircle, ArrowLeft, Zap, Bot, Radio, Cpu } from 'lucide-react';
 
 // ─── Data ─────────────────────────────────────────────────────────────────────
@@ -42,14 +42,11 @@ const AGENT_TYPES = [
   },
 ];
 
-const RND_DIVISIONS = [
-  { id: 'ai_ml_research',    label: 'AI / ML Research',   icon: '⟐', schedule: 'Every 6h' },
-  { id: 'tech_frameworks',   label: 'Tech Frameworks',    icon: '⟑', schedule: 'Daily'    },
-  { id: 'security_intel',    label: 'Security Intel',     icon: '⟒', schedule: 'Every 4h' },
-  { id: 'oss_scout',         label: 'OSS Scout',          icon: '⟓', schedule: 'Daily'    },
-  { id: 'tooling_infra',     label: 'Tooling & Infra',    icon: '⟔', schedule: 'Weekly'   },
-  { id: 'competitive_intel', label: 'Competitive Intel',  icon: '⟕', schedule: 'Weekly'   },
-];
+// R&D division icons (fallback when presets don't provide them)
+const RND_ICONS: Record<string, string> = {
+  ai_ml_research: '⟐', tech_frameworks: '⟑', security_intel: '⟒',
+  oss_scout: '⟓', tooling_infra: '⟔', competitive_intel: '⟕',
+};
 
 const mono: React.CSSProperties = { fontFamily: 'var(--font-mono)' };
 
@@ -85,13 +82,19 @@ export default function AgentRegistration() {
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState(false);
   const [skills, setSkills] = useState('');
+  const [presets, setPresets] = useState<PresetsResponse | null>(null);
 
   const [form, setForm] = useState<AgentRegistration>({
     name: '', handle: '', email: '',
     agent_type: 'worker', rnd_division: '',
+    current_mode: '',
     role: 'Developer', skills: [],
     specialties: '', experience: 'Senior',
   });
+
+  useEffect(() => {
+    presetsApi.list().then(setPresets).catch(() => { /* presets are optional */ });
+  }, []);
 
   const set = (k: string, v: any) => setForm(p => ({ ...p, [k]: v }));
   const selected = AGENT_TYPES.find(t => t.id === form.agent_type)!;
@@ -114,6 +117,7 @@ export default function AgentRegistration() {
         ...form,
         skills: skills.split(',').map(s => s.trim()).filter(Boolean),
         rnd_division: form.agent_type === 'rnd' ? form.rnd_division : undefined,
+        current_mode: (form.agent_type === 'worker' || form.agent_type === 'pm') ? form.current_mode || undefined : undefined,
       });
       setSuccess(true);
     } catch (e: any) { setError(e.message || 'Registration failed'); }
@@ -163,7 +167,11 @@ export default function AgentRegistration() {
   }
 
   // ── Form ───────────────────────────────────────────────────────────────────
-  const stepOffset = form.agent_type === 'rnd' ? 1 : 0;
+  // All agent types now have a section 02 (R&D division, Department, or PM mode)
+  const hasSection02 = form.agent_type === 'rnd' ||
+    (form.agent_type === 'worker' && presets?.departments && presets.departments.length > 0) ||
+    (form.agent_type === 'pm' && presets?.pm_modes && presets.pm_modes.length > 0);
+  const stepOffset = hasSection02 ? 1 : 0;
 
   return (
     <div className="animate-fade-up" style={{ maxWidth: 660, margin: '0 auto', paddingBottom: 40 }}>
@@ -268,22 +276,85 @@ export default function AgentRegistration() {
           }}>
             <SectionTag n="02" label="R&D Division" color="#ef4444" />
             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 8 }}>
-              {RND_DIVISIONS.map(div => {
-                const active = form.rnd_division === div.id;
+              {(presets?.rnd_divisions || []).map(div => {
+                const active = form.rnd_division === div.name;
+                const icon = RND_ICONS[div.name] || '⟐';
                 return (
-                  <button key={div.id} type="button" onClick={() => set('rnd_division', div.id)} style={{
+                  <button key={div.name} type="button" onClick={() => set('rnd_division', div.name)} style={{
                     background: active ? 'rgba(239,68,68,0.1)' : 'var(--ink-1)',
                     border: `1px solid ${active ? 'rgba(239,68,68,0.45)' : 'var(--ink-4)'}`,
                     borderRadius: 5, padding: '10px 12px', cursor: 'pointer',
                     textAlign: 'left', transition: 'all 100ms',
                   }}>
                     <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 4 }}>
-                      <span style={{ fontSize: 13, color: active ? '#ef4444' : 'var(--text-lo)' }}>{div.icon}</span>
+                      <span style={{ fontSize: 13, color: active ? '#ef4444' : 'var(--text-lo)' }}>{icon}</span>
                       <span style={{ ...mono, fontSize: 9, fontWeight: 700, color: active ? '#ef4444' : 'var(--text-mid)' }}>
-                        {div.label}
+                        {div.title}
                       </span>
                     </div>
-                    <div style={{ ...mono, fontSize: 8, color: 'var(--text-lo)' }}>{div.schedule}</div>
+                    {active && div.description && (
+                      <div style={{ ...mono, fontSize: 8, color: 'var(--text-lo)', marginTop: 4, lineHeight: 1.5 }}>{div.description}</div>
+                    )}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        )}
+
+        {/* ── 02 DEPARTMENT (worker) ─────────────────────────────────────────── */}
+        {form.agent_type === 'worker' && presets?.departments && presets.departments.length > 0 && (
+          <div style={{
+            background: 'var(--ink-2)', border: '1px solid rgba(59,130,246,0.2)',
+            borderRadius: 8, padding: '20px 22px',
+          }}>
+            <SectionTag n="02" label="Department" color="#3b82f6" />
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 8 }}>
+              {presets.departments.map(dept => {
+                const active = form.current_mode === dept.name;
+                return (
+                  <button key={dept.name} type="button" onClick={() => set('current_mode', dept.name)} style={{
+                    background: active ? 'rgba(59,130,246,0.1)' : 'var(--ink-1)',
+                    border: `1px solid ${active ? 'rgba(59,130,246,0.45)' : 'var(--ink-4)'}`,
+                    borderRadius: 5, padding: '10px 12px', cursor: 'pointer',
+                    textAlign: 'left', transition: 'all 100ms',
+                  }}>
+                    <span style={{ ...mono, fontSize: 9, fontWeight: 700, color: active ? '#3b82f6' : 'var(--text-mid)' }}>
+                      {dept.title}
+                    </span>
+                    {active && dept.description && (
+                      <div style={{ ...mono, fontSize: 8, color: 'var(--text-lo)', marginTop: 4, lineHeight: 1.5 }}>{dept.description}</div>
+                    )}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        )}
+
+        {/* ── 02 PM MODE (pm) ────────────────────────────────────────────────── */}
+        {form.agent_type === 'pm' && presets?.pm_modes && presets.pm_modes.length > 0 && (
+          <div style={{
+            background: 'var(--ink-2)', border: '1px solid rgba(245,158,11,0.2)',
+            borderRadius: 8, padding: '20px 22px',
+          }}>
+            <SectionTag n="02" label="PM Mode" color="#f59e0b" />
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 8 }}>
+              {presets.pm_modes.map(mode => {
+                const active = form.current_mode === mode.name;
+                return (
+                  <button key={mode.name} type="button" onClick={() => set('current_mode', mode.name)} style={{
+                    background: active ? 'rgba(245,158,11,0.1)' : 'var(--ink-1)',
+                    border: `1px solid ${active ? 'rgba(245,158,11,0.45)' : 'var(--ink-4)'}`,
+                    borderRadius: 5, padding: '10px 12px', cursor: 'pointer',
+                    textAlign: 'left', transition: 'all 100ms',
+                  }}>
+                    <span style={{ ...mono, fontSize: 9, fontWeight: 700, color: active ? '#f59e0b' : 'var(--text-mid)' }}>
+                      {mode.title}
+                    </span>
+                    {active && mode.description && (
+                      <div style={{ ...mono, fontSize: 8, color: 'var(--text-lo)', marginTop: 4, lineHeight: 1.5 }}>{mode.description}</div>
+                    )}
                   </button>
                 );
               })}

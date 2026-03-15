@@ -18,6 +18,21 @@ const wsManager = require('./websocket');
 const routes = require('./routes');
 const { optionalAuthMiddleware, authMiddleware } = require('./auth');
 const config = require('./config');
+const {
+  validate,
+  createProjectSchema,
+  updateProjectStatusSchema,
+  updateTaskSchema,
+  recordCostSchema,
+  createBudgetSchema,
+  registerMachineSchema,
+  registerUserSchema,
+  registerAgentSchema,
+  updateAgentSchema,
+  updateAgentStatusSchema,
+  editMessageSchema,
+  recordTokenUsageSchema,
+} = require('./validators');
 
 const PORT = config.PORT;
 const HOST = config.HOST;
@@ -29,6 +44,11 @@ const SERVER_START_TIME = Date.now();
 async function buildServer() {
   // Initialize database
   await initDatabase();
+
+  // Sync filesystem presets to database
+  const { syncPresetsToDb } = require('./presets');
+  const synced = syncPresetsToDb();
+  if (synced > 0) fastify.log.info(`Synced ${synced} presets to database`);
 
   // Register rate limiting
   await fastify.register(rateLimit, {
@@ -145,10 +165,10 @@ async function buildServer() {
   // PROJECT ROUTES
   // ============================================================================
   fastify.get('/api/projects', { preHandler: authMiddleware }, routes.listProjects);
-  fastify.post('/api/projects', { preHandler: authMiddleware }, routes.createProject);
+  fastify.post('/api/projects', { preHandler: [authMiddleware, validate(createProjectSchema)] }, routes.createProject);
   fastify.get('/api/projects/:id', { preHandler: optionalAuthMiddleware }, routes.getProject);
   fastify.get('/api/projects/:id/tasks', { preHandler: optionalAuthMiddleware }, routes.getProjectTasks);
-  fastify.patch('/api/projects/:id/status', { preHandler: authMiddleware }, routes.updateProjectStatus);
+  fastify.patch('/api/projects/:id/status', { preHandler: [authMiddleware, validate(updateProjectStatusSchema)] }, routes.updateProjectStatus);
 
   // ============================================================================
   // TASK ROUTES - PHASE 3
@@ -180,7 +200,7 @@ async function buildServer() {
   fastify.get('/api/tasks/:id', { preHandler: optionalAuthMiddleware }, routes.getTaskById);
 
   // Update task
-  fastify.patch('/api/tasks/:id', { preHandler: authMiddleware }, routes.updateTask);
+  fastify.patch('/api/tasks/:id', { preHandler: [authMiddleware, validate(updateTaskSchema)] }, routes.updateTask);
 
   // Delete task
   fastify.delete('/api/tasks/:id', { preHandler: authMiddleware }, routes.deleteTask);
@@ -264,7 +284,7 @@ async function buildServer() {
   // ============================================================================
   fastify.get('/api/costs', { preHandler: optionalAuthMiddleware }, routes.getCosts);
   fastify.get('/api/costs/summary', { preHandler: optionalAuthMiddleware }, routes.getCostSummary);
-  fastify.post('/api/costs', { preHandler: authMiddleware }, routes.recordCost);
+  fastify.post('/api/costs', { preHandler: [authMiddleware, validate(recordCostSchema)] }, routes.recordCost);
 
   // ============================================================================
   // REAL COST TRACKING ROUTES (NEW)
@@ -284,7 +304,7 @@ async function buildServer() {
   fastify.get('/api/tokens/providers/:provider', { preHandler: authMiddleware }, routes.getTokensProviderRoute);
   fastify.get('/api/tokens/context', { preHandler: authMiddleware }, routes.getContextTokensRoute);
   fastify.get('/api/tokens/status', { preHandler: authMiddleware }, routes.getTokenStatusRoute);
-  fastify.post('/api/tokens/record', { preHandler: authMiddleware }, routes.recordTokenUsageRoute);
+  fastify.post('/api/tokens/record', { preHandler: [authMiddleware, validate(recordTokenUsageSchema)] }, routes.recordTokenUsageRoute);
 
   // ============================================================================
   // TOKEN MONITORING ROUTES (NEW - Per Leonardo's Spec)
@@ -297,13 +317,13 @@ async function buildServer() {
   // BUDGET ROUTES
   // ============================================================================
   fastify.get('/api/budgets', { preHandler: authMiddleware }, routes.listBudgetsRoute);
-  fastify.post('/api/budgets', { preHandler: authMiddleware }, routes.createBudgetRoute);
+  fastify.post('/api/budgets', { preHandler: [authMiddleware, validate(createBudgetSchema)] }, routes.createBudgetRoute);
 
   // ============================================================================
   // MACHINE ROUTES
   // ============================================================================
   fastify.get('/api/machines', { preHandler: authMiddleware }, routes.listMachinesRoute);
-  fastify.post('/api/machines/register', routes.registerMachineRoute);
+  fastify.post('/api/machines/register', { preHandler: validate(registerMachineSchema) }, routes.registerMachineRoute);
   fastify.delete('/api/machines/:id', { preHandler: authMiddleware }, routes.deleteMachineRoute);
   fastify.post('/api/machines/:machineId/agents/:agentId', { preHandler: authMiddleware }, routes.linkMachineAgentRoute);
   fastify.delete('/api/machines/:machineId/agents/:agentId', { preHandler: authMiddleware }, routes.unlinkMachineAgentRoute);
@@ -351,7 +371,7 @@ async function buildServer() {
   }, routes.sendMessageRoute);
 
   fastify.get('/api/messages/:channel', { preHandler: optionalAuthMiddleware }, routes.getChannelMessagesRoute);
-  fastify.patch('/api/messages/:id', { preHandler: authMiddleware }, routes.editMessageRoute);
+  fastify.patch('/api/messages/:id', { preHandler: [authMiddleware, validate(editMessageSchema)] }, routes.editMessageRoute);
   fastify.delete('/api/messages/:id', { preHandler: authMiddleware }, routes.deleteMessageRoute);
 
   // DM Routes (Legacy)
@@ -389,7 +409,7 @@ async function buildServer() {
   }, routes.loginRoute);
   fastify.post('/api/auth/logout', { preHandler: authMiddleware }, routes.logoutRoute);
   fastify.get('/api/auth/me', { preHandler: authMiddleware }, routes.getMeRoute);
-  fastify.post('/api/auth/register', routes.registerRoute);
+  fastify.post('/api/auth/register', { preHandler: validate(registerUserSchema) }, routes.registerRoute);
 
   // ============================================================================
   // MANAGER AGENT ROUTES (NEW)
@@ -397,7 +417,7 @@ async function buildServer() {
   fastify.get('/api/agents', { preHandler: authMiddleware }, routes.listManagerAgentsRoute);
   fastify.get('/api/agents/chat', { preHandler: authMiddleware }, routes.getAgentsForChatRoute);
   fastify.get('/api/agents/:id', { preHandler: optionalAuthMiddleware }, routes.getManagerAgentRoute);
-  fastify.post('/api/agents/register', routes.registerManagerAgentRoute);
+  fastify.post('/api/agents/register', { preHandler: validate(registerAgentSchema) }, routes.registerManagerAgentRoute);
   fastify.post('/api/agents/:id/approve', { preHandler: authMiddleware }, routes.approveManagerAgentRoute);
   fastify.post('/api/agents/:id/reject', { preHandler: authMiddleware }, routes.rejectManagerAgentRoute);
   fastify.post('/api/admin/agents/:id/approve', { preHandler: authMiddleware }, routes.approveManagerAgentRoute);
@@ -406,8 +426,8 @@ async function buildServer() {
   fastify.get('/api/admin/agents/pending', { preHandler: authMiddleware }, routes.listPendingAgentsRoute);
   fastify.get('/api/admin/agents/approved', { preHandler: authMiddleware }, routes.listApprovedAgentsRoute);
   fastify.get('/api/admin/users', { preHandler: authMiddleware }, routes.listUsersRoute);
-  fastify.post('/api/agents/:id/status', { preHandler: authMiddleware }, routes.updateManagerAgentStatusRoute);
-  fastify.patch('/api/agents/:id', { preHandler: authMiddleware }, routes.patchManagerAgentRoute);
+  fastify.post('/api/agents/:id/status', { preHandler: [authMiddleware, validate(updateAgentStatusSchema)] }, routes.updateManagerAgentStatusRoute);
+  fastify.patch('/api/agents/:id', { preHandler: [authMiddleware, validate(updateAgentSchema)] }, routes.patchManagerAgentRoute);
   fastify.post('/api/agents/:id/heartbeat', { preHandler: optionalAuthMiddleware }, routes.agentHeartbeatRoute);
   fastify.get('/api/agents/:id/notifications', { preHandler: authMiddleware }, routes.getAgentNotificationsRoute);
   fastify.post('/api/agents/:id/notifications/:notificationId/read', { preHandler: authMiddleware }, routes.markAgentNotificationReadRoute);
@@ -453,6 +473,14 @@ async function buildServer() {
       }
     }
   }, routes.updateAgentProjectRoleRoute);
+
+  // ============================================================================
+  // PRESET ROUTES
+  // ============================================================================
+  fastify.get('/api/presets', routes.listPresetsRoute);
+  fastify.get('/api/presets/:type', routes.listPresetsByTypeRoute);
+  fastify.get('/api/presets/:type/:name', routes.getPresetRoute);
+  fastify.post('/api/presets/sync', { preHandler: authMiddleware }, routes.syncPresetsRoute);
 
   // ============================================================================
   // WEBSOCKET ENDPOINT

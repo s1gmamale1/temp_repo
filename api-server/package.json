@@ -9,8 +9,8 @@
     "seed": "node src/seed.js",
     "seed:full": "node seed-new.js",
     "test": "npm run test:unit && npm run test:integration",
-    "test:unit": "NODE_ENV=test node --test src/**/*.test.js",
-    "test:integration": "NODE_ENV=test node --test tests/integration/**/*.test.js",
+    "test:unit": "cross-env NODE_ENV=test node --test src/**/*.test.js",
+    "test:integration": "cross-env NODE_ENV=test node --test tests/integration/**/*.test.js",
     "lint": "eslint src/",
     "migrate": "node scripts/migrate.js",
     "migrate:pg": "node scripts/migrate-to-postgres.js",
@@ -34,9 +34,11 @@
     "better-sqlite3": "^12.6.2",
     "fastify": "^4.28.1",
     "pg": "^8.13.1",
-    "uuid": "^11.0.3"
+    "uuid": "^11.0.3",
+    "zod": "^4.3.6"
   },
   "devDependencies": {
+    "cross-env": "^10.1.0",
     "eslint": "^8.57.0",
     "pino-pretty": "^11.2.2"
   },

@@ -4,6 +4,7 @@
  */
 
 const https = require('https');
+const { loadPresetFile, extractSection } = require('./presets');
 
 const OPENROUTER_HOST = 'openrouter.ai';
 
@@ -71,6 +72,31 @@ function callOpenRouter(messages, model, apiKey) {
   });
 }
 
+// ── Preset content extraction ────────────────────────────────────────────────
+const MAX_PRESET_CHARS = 2000;
+
+/**
+ * Load a preset and extract specific sections.
+ * Returns formatted string or '' if preset not found.
+ */
+function getPresetContent(type, name, sectionNames) {
+  const content = loadPresetFile(type, name);
+  if (!content) return '';
+
+  const parts = [];
+  for (const sec of sectionNames) {
+    const body = extractSection(content, sec);
+    if (body) parts.push(`### ${sec}\n${body}`);
+  }
+  if (!parts.length) return '';
+
+  let combined = parts.join('\n\n');
+  if (combined.length > MAX_PRESET_CHARS) {
+    combined = combined.substring(0, MAX_PRESET_CHARS).replace(/\n[^\n]*$/, '') + '\n...';
+  }
+  return combined;
+}
+
 // ── System prompt per agent type ─────────────────────────────────────────────
 function buildSystemPrompt(agent, project) {
   const type = agent.agent_type || 'worker';
@@ -83,30 +109,53 @@ function buildSystemPrompt(agent, project) {
     : '';
 
   if (type === 'pm') {
-    return `You are ${agent.name}, a Project Manager AI agent${agent.current_mode ? ` running in ${agent.current_mode.replace(/_/g, ' ').toUpperCase()} mode` : ''}.
+    const modeLabel = agent.current_mode ? agent.current_mode.replace(/_/g, ' ').toUpperCase() : '';
+    const presetBlock = agent.current_mode
+      ? getPresetContent('pm_mode', agent.current_mode, ['Overview', 'Architecture Template', 'Team Composition', 'Model Recommendations'])
+      : '';
+    const presetSection = presetBlock
+      ? `\n\nYou are operating in ${modeLabel} project mode.\n\n${presetBlock}`
+      : '';
+
+    return `You are ${agent.name}, a Project Manager AI agent${modeLabel ? ` running in ${modeLabel} mode` : ''}.
 
 Your responsibilities: Break work into clear deliverables, identify dependencies, define acceptance criteria, coordinate team effort.${projectCtx}
 
-Respond with structured, actionable output. Use markdown. Be concise and specific — not theoretical.`;
+Respond with structured, actionable output. Use markdown. Be concise and specific — not theoretical.${presetSection}`;
   }
 
   if (type === 'rnd') {
     const division = (agent.rnd_division || 'general research').replace(/_/g, ' ');
+    const presetBlock = agent.rnd_division
+      ? getPresetContent('rnd_division', agent.rnd_division, ['Purpose', 'Research Sources', 'Output Format'])
+      : '';
+    const presetSection = presetBlock
+      ? `\n\nYou are an R&D agent specializing in ${division.toUpperCase()}.\n\n${presetBlock}`
+      : '';
+
     return `You are ${agent.name}, an R&D Research agent specializing in ${division}.
 
 Your responsibilities: Research emerging solutions, evaluate technologies, surface insights and recommendations.${projectCtx}
 
-Respond with findings, analysis, and concrete recommendations. Cite specific technologies, tools, or approaches. Use markdown.`;
+Respond with findings, analysis, and concrete recommendations. Cite specific technologies, tools, or approaches. Use markdown.${presetSection}`;
   }
 
   // Worker
   const roleLabel = (agent.role || 'developer').replace(/_/g, ' ');
   const skillsStr = skills.length ? ` Expert in: ${skills.slice(0, 5).join(', ')}.` : '';
+  const dept = agent.current_mode || '';
+  const presetBlock = dept
+    ? getPresetContent('worker_dept', dept, ['Role Definition', 'Tools & Technologies', 'Standards & Best Practices', 'Communication Protocol'])
+    : '';
+  const presetSection = presetBlock
+    ? `\n\nYou are a ${dept.replace(/_/g, ' ').toUpperCase()} specialist.\n\n${presetBlock}`
+    : '';
+
   return `You are ${agent.name}, a ${roleLabel} AI agent.${skillsStr}
 
 Your responsibilities: Implement features, write code, solve technical problems, deliver working solutions.${projectCtx}
 
-Respond with concrete technical output — code, configuration, implementation steps, or technical specs. Use markdown with code blocks where relevant.`;
+Respond with concrete technical output — code, configuration, implementation steps, or technical specs. Use markdown with code blocks where relevant.${presetSection}`;
 }
 
 // ── Select model ──────────────────────────────────────────────────────────────

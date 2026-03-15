@@ -302,6 +302,31 @@ export const machinesApi = {
   delete: (id: string) => fetchApi(`/api/machines/${id}`, { method: 'DELETE' }),
 };
 
+// Preset types
+export interface Preset {
+  name: string;
+  title: string;
+  description: string;
+  type: string;
+}
+
+export interface PresetDetail extends Preset {
+  content: string;
+}
+
+export interface PresetsResponse {
+  pm_modes: Preset[];
+  departments: Preset[];
+  rnd_divisions: Preset[];
+}
+
+// Presets API - no auth required
+export const presetsApi = {
+  list: (): Promise<PresetsResponse> => fetchApi('/api/presets'),
+  listByType: (type: string): Promise<{ type: string; presets: Preset[] }> => fetchApi(`/api/presets/${type}`),
+  get: (type: string, name: string): Promise<PresetDetail> => fetchApi(`/api/presets/${type}/${name}`),
+};
+
 // Agent Types
 export interface AgentRegistration {
   name: string;
@@ -309,6 +334,7 @@ export interface AgentRegistration {
   email?: string;
   agent_type: 'pm' | 'worker' | 'rnd';
   rnd_division?: string;
+  current_mode?: string;
   role: 'Task Lead' | 'Researcher' | 'Developer' | 'Designer' | 'QA' | 'DevOps';
   skills: string[];
   specialties?: string;
