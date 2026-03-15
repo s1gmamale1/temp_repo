@@ -147,11 +147,13 @@ const ARCH_LAYERS = [
     color: '#f59e0b',
     tech: 'Fastify + Node.js',
     modules: [
-      { name: 'REST API', desc: '50+ endpoints across 8 domains' },
-      { name: 'WebSocket', desc: 'Persistent real-time connection' },
+      { name: 'REST API', desc: '55+ endpoints across 9 domains' },
+      { name: 'WebSocket', desc: 'Persistent real-time + Redis pub/sub' },
       { name: 'Auth', desc: 'JWT sessions + bcrypt passwords' },
       { name: 'AI Executor', desc: 'OpenRouter LLM integration' },
       { name: 'R&D Scheduler', desc: 'Cron-based agent automation' },
+      { name: 'Redis', desc: 'Caching, rate limiting, pub/sub' },
+      { name: 'Sentry', desc: 'Error tracking & monitoring' },
     ],
   },
   {
@@ -239,6 +241,8 @@ const API_SECTIONS = [
       { method: 'POST', path: '/api/agents/:id/status', desc: 'Update agent status' },
       { method: 'POST', path: '/api/admin/agents/:id/approve', desc: 'Approve agent (admin)' },
       { method: 'POST', path: '/api/admin/agents/:id/reject', desc: 'Reject agent (admin)' },
+      { method: 'GET', path: '/api/agents/directory', desc: 'Agent discovery for A2A' },
+      { method: 'POST', path: '/api/agents/:id/message', desc: 'Agent-to-agent message' },
     ],
   },
   {
@@ -283,7 +287,9 @@ const API_SECTIONS = [
     title: 'MACHINES', icon: Monitor,
     endpoints: [
       { method: 'GET', path: '/api/machines', desc: 'List machines' },
+      { method: 'GET', path: '/api/machines/health', desc: 'Fleet health overview' },
       { method: 'POST', path: '/api/machines/register', desc: 'Register machine' },
+      { method: 'POST', path: '/api/machines/assign-agent', desc: 'Auto-assign to least-loaded' },
       { method: 'DELETE', path: '/api/machines/:id', desc: 'Delete machine' },
     ],
   },
@@ -427,7 +433,7 @@ function OverviewTab() {
       <SectionHeader>PROJECT STATS</SectionHeader>
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 10, marginBottom: 16 }}>
         {[
-          { label: 'API Endpoints', value: '55+', color: '#f59e0b' },
+          { label: 'API Endpoints', value: '60+', color: '#f59e0b' },
           { label: 'Frontend Pages', value: '16', color: '#22d3ee' },
           { label: 'DB Tables', value: '12', color: '#4ade80' },
           { label: 'WS Events', value: '10', color: '#a78bfa' },
@@ -756,25 +762,21 @@ function RoadmapTab() {
       </div>
 
       {/* What's next */}
-      <SectionHeader>FUTURE ENHANCEMENTS</SectionHeader>
-      <Card style={{ borderLeft: '3px solid #60a5fa' }}>
+      <SectionHeader>BONUS ENHANCEMENTS (ALL COMPLETED)</SectionHeader>
+      <Card style={{ borderLeft: '3px solid #4ade80' }}>
         <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
           {[
-            { priority: 'OPT', task: 'PostgreSQL migration for production scale' },
-            { priority: 'OPT', task: 'Redis caching layer for high-traffic endpoints' },
-            { priority: 'OPT', task: 'Sentry error tracking integration' },
-            { priority: 'OPT', task: 'HTTPS/SSL via Traefik reverse proxy' },
-            { priority: 'OPT', task: 'Horizontal scaling with multiple API instances' },
-            { priority: 'OPT', task: 'Agent-to-agent communication protocol' },
+            { task: 'PostgreSQL migration for production scale', detail: 'Full 26-table migration script' },
+            { task: 'Redis caching layer', detail: 'Rate limiting, API cache, WS pub/sub' },
+            { task: 'Sentry error tracking', detail: 'Auto-capture 5xx errors, strips sensitive data' },
+            { task: 'HTTPS/SSL via Traefik', detail: 'Let\'s Encrypt auto-SSL with HTTP redirect' },
+            { task: 'Horizontal scaling', detail: 'Redis pub/sub + sticky sessions, --scale api=N' },
+            { task: 'Agent-to-agent communication', detail: 'Directory API + direct messaging protocol' },
           ].map((t, i) => (
             <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-              <span style={{
-                ...M, fontSize: 8, fontWeight: 700, padding: '2px 6px', borderRadius: 2, minWidth: 32, textAlign: 'center',
-                background: 'rgba(96,165,250,0.15)', color: '#60a5fa',
-              }}>
-                {t.priority}
-              </span>
+              <CheckCircle size={10} style={{ color: '#4ade80', flexShrink: 0 }} />
               <span style={{ fontSize: 11, color: 'var(--text-hi)', flex: 1 }}>{t.task}</span>
+              <span style={{ fontSize: 9, color: 'var(--text-lo)' }}>{t.detail}</span>
             </div>
           ))}
         </div>

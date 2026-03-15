@@ -60,7 +60,7 @@ describe('Docs page', () => {
     expect(screen.getByText('PROJECT COMPLETE')).toBeInTheDocument();
     expect(screen.getByText('ESTIMATED TIMELINE')).toBeInTheDocument();
     expect(screen.getByText('DEVELOPMENT PHASES')).toBeInTheDocument();
-    expect(screen.getByText('FUTURE ENHANCEMENTS')).toBeInTheDocument();
+    expect(screen.getByText('BONUS ENHANCEMENTS (ALL COMPLETED)')).toBeInTheDocument();
   });
 
   it('shows phase progress in roadmap', () => {
