@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback } from 'react';
-import { rndApi, RndAgent, RndFinding } from '../services/api';
+import { rndApi } from '../services/api';
+import type { RndAgent, RndFinding } from '../services/api';
 import { FlaskConical, Loader2, RefreshCw, Play, Clock, ChevronDown, ChevronUp, CheckCircle } from 'lucide-react';
 
 const SCHEDULE_OPTIONS = [

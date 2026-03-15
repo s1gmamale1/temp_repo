@@ -145,6 +145,18 @@ function App() {
     setIsReady(true);
   }, []);
 
+  // Listen for global API error events and show toast notifications
+  useEffect(() => {
+    const handler = (e: Event) => {
+      const detail = (e as CustomEvent).detail;
+      if (detail?.message) {
+        toast.error('API Error', detail.message);
+      }
+    };
+    window.addEventListener('api-error', handler);
+    return () => window.removeEventListener('api-error', handler);
+  }, []);
+
   const handleLogin = () => {
     setUser(userSession.getUser());
   };
@@ -161,18 +173,6 @@ function App() {
       </div>
     );
   }
-
-  // Listen for global API error events and show toast notifications
-  useEffect(() => {
-    const handler = (e: Event) => {
-      const detail = (e as CustomEvent).detail;
-      if (detail?.message) {
-        toast.error('API Error', detail.message);
-      }
-    };
-    window.addEventListener('api-error', handler);
-    return () => window.removeEventListener('api-error', handler);
-  }, []);
 
   // Not logged in - show auth routes
   if (!user) {
