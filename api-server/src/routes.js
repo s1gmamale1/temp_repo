@@ -47,13 +47,7 @@ const {
   sendChannelMessage
 } = require('./chat');
 const {
-  getTokenDashboard,
-  getContextTokenStats,
-  checkProviderStatus,
-  storeTokenUsage,
-  getKimiUsage,
-  getOpenAIUsage,
-  getClaudeUsage
+  storeTokenUsage
 } = require('./token-dashboard');
 
 const {
@@ -4018,7 +4012,7 @@ async function deleteMachineRoute(request, reply) {
 // GET /api/tokens/dashboard - Full token dashboard
 async function getTokenDashboardRoute(request, reply) {
   try {
-    const result = await getTokenDashboard();
+    const result = await getDashboardSummary(request.query?.month);
     return result;
   } catch (err) {
     reply.code(500);
@@ -4026,28 +4020,16 @@ async function getTokenDashboardRoute(request, reply) {
   }
 }
 
-// GET /api/tokens/providers/:provider - Individual provider usage
+// GET /api/tokens/providers/:provider - Individual provider usage (backed by token-monitoring)
 async function getProviderTokensRoute(request, reply) {
   try {
     const { provider } = request.params;
-
-    let result;
-    switch (provider) {
-      case 'kimi':
-        result = await getKimiUsage();
-        break;
-      case 'openai':
-        result = await getOpenAIUsage();
-        break;
-      case 'anthropic':
-      case 'claude':
-        result = await getClaudeUsage();
-        break;
-      default:
-        reply.code(400);
-        return { error: 'Unknown provider. Use: kimi, openai, or anthropic' };
+    const validProviders = ['kimi', 'openai', 'anthropic', 'claude'];
+    if (!validProviders.includes(provider)) {
+      reply.code(400);
+      return { error: 'Unknown provider. Use: kimi, openai, or anthropic' };
     }
-
+    const result = await getProviderDetails(provider, request.query?.month);
     return result;
   } catch (err) {
     reply.code(500);
@@ -4055,22 +4037,34 @@ async function getProviderTokensRoute(request, reply) {
   }
 }
 
-// GET /api/tokens/context - Context token stats
+// GET /api/tokens/context - Context token stats (backed by token-monitoring models breakdown)
 async function getContextTokensRoute(request, reply) {
   try {
-    const result = await getContextTokenStats(request.query);
-    return result;
+    const result = await getModelsBreakdown(request.query?.month);
+    return {
+      models: result.models || [],
+      daily: [],
+      summary: {
+        total_tokens: result.models?.reduce((s, m) => s + (m.tokens?.total || 0), 0) || 0,
+        total_requests: result.models?.reduce((s, m) => s + (m.requests || 0), 0) || 0,
+        avg_tokens_per_request: 0,
+      },
+    };
   } catch (err) {
     reply.code(500);
     return { error: err.message };
   }
 }
 
-// GET /api/tokens/status - Provider API status
+// GET /api/tokens/status - Provider API status (backed by token-monitoring)
 async function getTokenStatusRoute(request, reply) {
   try {
-    const result = await checkProviderStatus();
-    return result;
+    const summary = await getDashboardSummary();
+    const status = {};
+    for (const p of summary.providers || []) {
+      status[p.name] = { provider: p.name, status: p.request_count > 0 ? 'active' : 'no_data', request_count: p.request_count };
+    }
+    return status;
   } catch (err) {
     reply.code(500);
     return { error: err.message };

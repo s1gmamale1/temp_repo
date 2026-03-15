@@ -47,16 +47,4 @@ async function storeTokenUsage(data) {
   }
 }
 
-// Legacy stubs — kept so old imports don't break
-async function getTokenDashboard()    { const { getDashboardSummary } = require('./token-monitoring'); return getDashboardSummary(); }
-async function getContextTokenStats(opts) { return { models: [], daily: [], summary: { total_tokens: 0, total_requests: 0, avg_tokens_per_request: 0 } }; }
-async function checkProviderStatus()  { return {}; }
-async function getKimiUsage()   { return { provider: 'kimi',   status: 'no_api_key' }; }
-async function getOpenAIUsage() { return { provider: 'openai', status: 'no_api_key' }; }
-async function getClaudeUsage() { return { provider: 'claude', status: 'no_api_key' }; }
-
-module.exports = {
-  storeTokenUsage,
-  getTokenDashboard, getContextTokenStats, checkProviderStatus,
-  getKimiUsage, getOpenAIUsage, getClaudeUsage
-};
+module.exports = { storeTokenUsage };
