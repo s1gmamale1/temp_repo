@@ -254,7 +254,7 @@ export default function AgentDetail() {
       {agent.agent_type === 'rnd' && agent.rnd_division && (
         <PresetSection
           label="R&D Division"
-          type="rnd_divisions"
+          type="rnd_division"
           name={agent.rnd_division}
           color="#ef4444"
           open={presetOpen}
@@ -263,7 +263,7 @@ export default function AgentDetail() {
             setPresetOpen(willOpen);
             if (willOpen && !presetContent) {
               setPresetLoading(true);
-              presetsApi.get('rnd_divisions', agent.rnd_division!).then(setPresetContent).catch(() => {}).finally(() => setPresetLoading(false));
+              presetsApi.get('rnd_division', agent.rnd_division!).then(setPresetContent).catch(() => {}).finally(() => setPresetLoading(false));
             }
           }}
           content={presetContent}

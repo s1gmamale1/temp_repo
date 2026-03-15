@@ -304,7 +304,7 @@ class SQLiteAdapter {
       CREATE TABLE IF NOT EXISTS channels (
         id TEXT PRIMARY KEY DEFAULT (lower(hex(randomblob(16)))),
         name TEXT NOT NULL,
-        type TEXT CHECK(type IN ('general', 'project', 'dm')) NOT NULL DEFAULT 'general',
+        type TEXT CHECK(type IN ('general', 'project', 'dm', 'rnd_feed')) NOT NULL DEFAULT 'general',
         created_by TEXT REFERENCES users(id),
         project_id TEXT REFERENCES projects(id),
         participant_1_id TEXT REFERENCES users(id),
@@ -391,7 +391,7 @@ class SQLiteAdapter {
             CREATE TABLE IF NOT EXISTS channels_new (
               id TEXT PRIMARY KEY DEFAULT (lower(hex(randomblob(16)))),
               name TEXT NOT NULL,
-              type TEXT CHECK(type IN ('general', 'project', 'dm')) NOT NULL DEFAULT 'general',
+              type TEXT CHECK(type IN ('general', 'project', 'dm', 'rnd_feed')) NOT NULL DEFAULT 'general',
               created_by TEXT REFERENCES users(id),
               project_id TEXT REFERENCES projects(id),
               participant_1_id TEXT REFERENCES users(id),
@@ -420,6 +420,48 @@ class SQLiteAdapter {
       console.warn('channels migration skipped:', migErr.message);
     }
 
+    // Migrate channels table to add rnd_feed type if missing
+    try {
+      const channelSchema = this.db.prepare(`
+        SELECT sql FROM sqlite_master WHERE type='table' AND name='channels'
+      `).get();
+
+      if (channelSchema?.sql && !channelSchema.sql.includes('rnd_feed')) {
+        console.log('🔧 Migrating channels table - adding rnd_feed type...');
+        const migrateRnd = this.db.transaction(() => {
+          this.db.exec(`
+            CREATE TABLE IF NOT EXISTS channels_new (
+              id TEXT PRIMARY KEY DEFAULT (lower(hex(randomblob(16)))),
+              name TEXT NOT NULL,
+              type TEXT CHECK(type IN ('general', 'project', 'dm', 'rnd_feed')) NOT NULL DEFAULT 'general',
+              created_by TEXT REFERENCES users(id),
+              project_id TEXT REFERENCES projects(id),
+              participant_1_id TEXT REFERENCES users(id),
+              participant_2_id TEXT REFERENCES users(id),
+              is_dm INTEGER DEFAULT 0,
+              dm_user_id TEXT REFERENCES users(id),
+              dm_agent_id TEXT,
+              is_archived BOOLEAN DEFAULT FALSE,
+              created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            )
+          `);
+          this.db.prepare(`INSERT OR IGNORE INTO channels_new SELECT * FROM channels`).run();
+          this.db.exec(`DROP TABLE channels`);
+          this.db.exec(`ALTER TABLE channels_new RENAME TO channels`);
+          this.db.exec(`
+            CREATE INDEX IF NOT EXISTS idx_channels_type ON channels(type);
+            CREATE INDEX IF NOT EXISTS idx_channels_project ON channels(project_id);
+            CREATE INDEX IF NOT EXISTS idx_channels_is_dm ON channels(is_dm);
+            CREATE INDEX IF NOT EXISTS idx_channels_archived ON channels(is_archived)
+          `);
+        });
+        migrateRnd();
+        console.log('✅ channels table migrated (rnd_feed added)');
+      }
+    } catch (migErr) {
+      console.warn('channels rnd_feed migration skipped:', migErr.message);
+    }
+
     // Insert default 'general' channel if not exists
     const generalChannel = this.db.prepare(`SELECT id FROM channels WHERE id = 'general'`).get();
     if (!generalChannel) {
@@ -428,6 +470,13 @@ class SQLiteAdapter {
         VALUES ('general', 'general', 'general', datetime('now'))
       `).run();
       console.log('✅ Created general channel');
+    }
+
+    // Insert default 'rnd_feed' channel if not exists
+    const rndFeedExists = this.db.prepare("SELECT id FROM channels WHERE type = 'rnd_feed'").get();
+    if (!rndFeedExists) {
+      this.db.prepare("INSERT INTO channels (id, name, type, created_at) VALUES (?, 'R&D Feed', 'rnd_feed', datetime('now'))").run(generateId());
+      console.log('✅ Created R&D Feed channel');
     }
 
     // Machines table (for Mac Mini and other hardware)

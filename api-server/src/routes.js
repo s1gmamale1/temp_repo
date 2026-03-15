@@ -4977,3 +4977,172 @@ async function updatePreferencesRoute(request, reply) {
 module.exports.updateProfileRoute = updateProfileRoute;
 module.exports.getPreferencesRoute = getPreferencesRoute;
 module.exports.updatePreferencesRoute = updatePreferencesRoute;
+
+// ============================================================================
+// R&D CONTROL ROUTES
+// ============================================================================
+
+// GET /api/rnd/status — Get all R&D agents with schedule info
+async function getRndStatusRoute(request, reply) {
+  try {
+    const { getSchedulerStatus } = require('./rnd-scheduler');
+    const agents = getSchedulerStatus();
+    return { agents, count: agents.length };
+  } catch (err) {
+    reply.code(500);
+    return { error: 'Failed to get R&D status' };
+  }
+}
+
+// POST /api/rnd/:id/execute — Manually trigger R&D research
+async function executeRndRoute(request, reply) {
+  try {
+    const { id } = request.params;
+    const db = getDb();
+
+    const agent = db.prepare('SELECT * FROM manager_agents WHERE id = ? AND agent_type = ?').get(id, 'rnd');
+    if (!agent) {
+      reply.code(404);
+      return { error: 'R&D agent not found' };
+    }
+
+    if (!agent.is_approved) {
+      reply.code(400);
+      return { error: 'Agent must be approved before execution' };
+    }
+
+    const { executeRndResearch } = require('./rnd-scheduler');
+    const wsManager = request.server.websocketManager;
+    const result = await executeRndResearch(id, wsManager);
+
+    return { success: true, ...result };
+  } catch (err) {
+    console.error('R&D execution error:', err);
+    reply.code(500);
+    return { error: 'R&D execution failed' };
+  }
+}
+
+// PATCH /api/rnd/:id/schedule — Update R&D agent schedule
+async function updateRndScheduleRoute(request, reply) {
+  try {
+    const { id } = request.params;
+    const { schedule } = request.body;
+    const db = getDb();
+
+    const agent = db.prepare('SELECT * FROM manager_agents WHERE id = ? AND agent_type = ?').get(id, 'rnd');
+    if (!agent) {
+      reply.code(404);
+      return { error: 'R&D agent not found' };
+    }
+
+    db.prepare("UPDATE manager_agents SET rnd_schedule = ?, updated_at = datetime('now') WHERE id = ?")
+      .run(schedule, id);
+
+    // Refresh this agent's schedule
+    const { scheduleAgent } = require('./rnd-scheduler');
+    const updatedAgent = db.prepare('SELECT * FROM manager_agents WHERE id = ?').get(id);
+    const wsManager = request.server.websocketManager;
+    scheduleAgent(updatedAgent, wsManager);
+
+    return { success: true, agent_id: id, schedule };
+  } catch (err) {
+    console.error('R&D schedule update error:', err);
+    reply.code(500);
+    return { error: 'Failed to update schedule' };
+  }
+}
+
+// GET /api/rnd/:id/findings — Get R&D findings history
+async function getRndFindingsRoute(request, reply) {
+  try {
+    const { id } = request.params;
+    const db = getDb();
+    const limit = parseInt(request.query.limit) || 20;
+    const offset = parseInt(request.query.offset) || 0;
+
+    const agent = db.prepare('SELECT * FROM manager_agents WHERE id = ? AND agent_type = ?').get(id, 'rnd');
+    if (!agent) {
+      reply.code(404);
+      return { error: 'R&D agent not found' };
+    }
+
+    // Get rnd_feed channel
+    const feedChannel = db.prepare("SELECT id FROM channels WHERE type = 'rnd_feed'").get();
+    if (!feedChannel) {
+      return { findings: [], total: 0 };
+    }
+
+    const findings = db.prepare(`
+      SELECT id, content, metadata, created_at
+      FROM messages
+      WHERE channel_id = ? AND agent_id = ?
+      ORDER BY created_at DESC
+      LIMIT ? OFFSET ?
+    `).all(feedChannel.id, id, limit, offset);
+
+    const total = db.prepare(`
+      SELECT COUNT(*) as count FROM messages WHERE channel_id = ? AND agent_id = ?
+    `).get(feedChannel.id, id);
+
+    return {
+      findings: findings.map(f => ({
+        ...f,
+        metadata: f.metadata ? JSON.parse(f.metadata) : {},
+      })),
+      total: total.count,
+      limit,
+      offset,
+    };
+  } catch (err) {
+    console.error('R&D findings error:', err);
+    reply.code(500);
+    return { error: 'Failed to get findings' };
+  }
+}
+
+// GET /api/rnd/feed — Get all R&D feed messages
+async function getRndFeedRoute(request, reply) {
+  try {
+    const db = getDb();
+    const limit = parseInt(request.query.limit) || 50;
+    const offset = parseInt(request.query.offset) || 0;
+
+    const feedChannel = db.prepare("SELECT id FROM channels WHERE type = 'rnd_feed'").get();
+    if (!feedChannel) {
+      return { messages: [], total: 0 };
+    }
+
+    const messages = db.prepare(`
+      SELECT m.id, m.content, m.metadata, m.created_at, m.agent_id,
+             a.name as agent_name, a.rnd_division
+      FROM messages m
+      LEFT JOIN manager_agents a ON m.agent_id = a.id
+      WHERE m.channel_id = ?
+      ORDER BY m.created_at DESC
+      LIMIT ? OFFSET ?
+    `).all(feedChannel.id, limit, offset);
+
+    const total = db.prepare('SELECT COUNT(*) as count FROM messages WHERE channel_id = ?').get(feedChannel.id);
+
+    return {
+      messages: messages.map(m => ({
+        ...m,
+        metadata: m.metadata ? JSON.parse(m.metadata) : {},
+      })),
+      total: total.count,
+      limit,
+      offset,
+    };
+  } catch (err) {
+    console.error('R&D feed error:', err);
+    reply.code(500);
+    return { error: 'Failed to get R&D feed' };
+  }
+}
+
+module.exports.getRndStatusRoute = getRndStatusRoute;
+module.exports.executeRndRoute = executeRndRoute;
+module.exports.updateRndScheduleRoute = updateRndScheduleRoute;
+module.exports.getRndFindingsRoute = getRndFindingsRoute;
+module.exports.getRndFeedRoute = getRndFeedRoute;

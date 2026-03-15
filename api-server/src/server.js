@@ -36,6 +36,7 @@ const {
   recordTokenUsageSchema,
   updateProfileSchema,
   updatePreferencesSchema,
+  updateRndScheduleSchema,
 } = require('./validators');
 const authRoutes = require('./auth.routes');
 
@@ -122,6 +123,9 @@ async function buildServer() {
 
   // Register WebSocket
   await fastify.register(websocket);
+
+  // Attach wsManager to fastify so routes can access via request.server.websocketManager
+  fastify.decorate('websocketManager', wsManager);
 
   // Request logging middleware
   fastify.addHook('onRequest', async (request, reply) => {
@@ -507,6 +511,15 @@ async function buildServer() {
   }, routes.updateAgentProjectRoleRoute);
 
   // ============================================================================
+  // R&D ROUTES
+  // ============================================================================
+  fastify.get('/api/rnd/status', { preHandler: authMiddleware }, routes.getRndStatusRoute);
+  fastify.get('/api/rnd/feed', { preHandler: authMiddleware }, routes.getRndFeedRoute);
+  fastify.post('/api/rnd/:id/execute', { preHandler: authMiddleware }, routes.executeRndRoute);
+  fastify.patch('/api/rnd/:id/schedule', { preHandler: [authMiddleware, validate(updateRndScheduleSchema)] }, routes.updateRndScheduleRoute);
+  fastify.get('/api/rnd/:id/findings', { preHandler: authMiddleware }, routes.getRndFindingsRoute);
+
+  // ============================================================================
   // PRESET ROUTES
   // ============================================================================
   fastify.get('/api/presets', routes.listPresetsRoute);
@@ -733,6 +746,11 @@ async function start() {
         console.error('[Heartbeat cron error]', e.message);
       }
     }, 60 * 1000);
+    // ──────────────────────────────────────────────────────────────────────────
+
+    // ── R&D autonomous agent scheduler ────────────────────────────────────────
+    const { startRndScheduler } = require('./rnd-scheduler');
+    startRndScheduler(wsManager);
     // ──────────────────────────────────────────────────────────────────────────
 
     console.log(`🚀 PROJECT-CLAW API Server v1.2.0 running at http://${HOST}:${PORT}`);

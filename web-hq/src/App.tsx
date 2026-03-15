@@ -21,6 +21,7 @@ import Agents from './pages/Agents';
 import AgentRegistration from './pages/AgentRegistration';
 import AgentDetail from './pages/AgentDetail';
 import HQ from './pages/HQ';
+import RndPanel from './pages/RndPanel';
 import ProjectAssignmentBoard from './pages/ProjectAssignmentBoard';
 import { userSession, wsClient } from './services/api';
 import { useChatStore } from './store/chatStore';
@@ -221,6 +222,14 @@ function App() {
           <Route path="/agents/:id" element={<AgentDetail />} />
           <Route path="/hq" element={<HQ />} />
           <Route path="/assign" element={<ProjectAssignmentBoard />} />
+          <Route
+            path="/rnd"
+            element={
+              <ProtectedRoute user={user}>
+                <RndPanel />
+              </ProtectedRoute>
+            }
+          />
           <Route
             path="/admin"
             element={

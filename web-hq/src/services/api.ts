@@ -751,6 +751,55 @@ export const userApi = {
     }),
 };
 
+// R&D types
+export interface RndAgent {
+  id: string;
+  name: string;
+  rnd_division: string;
+  rnd_schedule: string | null;
+  rnd_last_run: string | null;
+  status: string;
+  is_approved: boolean;
+  scheduled: boolean;
+  cron_expression: string;
+  default_schedule: string;
+  model: string;
+}
+
+export interface RndFinding {
+  id: string;
+  content: string;
+  metadata: {
+    type: string;
+    division: string;
+    impact_level: string;
+    model: string;
+    tokens: { prompt: number; completion: number };
+    cost: number;
+    skipped: boolean;
+  };
+  created_at: string;
+  agent_id: string;
+  agent_name?: string;
+  rnd_division?: string;
+}
+
+export const rndApi = {
+  getStatus: (): Promise<{ agents: RndAgent[]; count: number }> =>
+    fetchApi('/api/rnd/status'),
+  getFeed: (limit = 50, offset = 0): Promise<{ messages: RndFinding[]; total: number }> =>
+    fetchApi(`/api/rnd/feed?limit=${limit}&offset=${offset}`),
+  execute: (agentId: string): Promise<{ success: boolean; impact_level: string; message_id: string }> =>
+    fetchApi(`/api/rnd/${agentId}/execute`, { method: 'POST' }),
+  updateSchedule: (agentId: string, schedule: string) =>
+    fetchApi(`/api/rnd/${agentId}/schedule`, {
+      method: 'PATCH',
+      body: JSON.stringify({ schedule }),
+    }),
+  getFindings: (agentId: string, limit = 20): Promise<{ findings: RndFinding[]; total: number }> =>
+    fetchApi(`/api/rnd/${agentId}/findings?limit=${limit}`),
+};
+
 // User session management
 export const userSession = {
   getUser: () => {

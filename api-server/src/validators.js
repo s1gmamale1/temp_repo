@@ -256,6 +256,14 @@ const updatePreferencesSchema = z.object({
 });
 
 // ============================================================================
+// R&D SCHEMAS
+// ============================================================================
+
+const updateRndScheduleSchema = z.object({
+  schedule: z.string().min(1, 'Schedule is required').max(100),
+});
+
+// ============================================================================
 // EXPORTS
 // ============================================================================
 
@@ -280,4 +288,5 @@ module.exports = {
   recordTokenUsageSchema,
   updateProfileSchema,
   updatePreferencesSchema,
+  updateRndScheduleSchema,
 };
