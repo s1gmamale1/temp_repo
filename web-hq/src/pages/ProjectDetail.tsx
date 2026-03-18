@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react';
 import { useParams, Link, useNavigate } from 'react-router-dom';
-import { projectsApi, projectAgentsApi, chatApi, type Agent } from '../services/api';
+import { projectsApi, projectAgentsApi, chatApi, getPriorityLabel, type Agent } from '../services/api';
 import ProjectAssignAgentDialog from '../components/ProjectAssignAgentDialog';
 import TaskList from '../components/TaskList';
 import {
@@ -46,7 +46,8 @@ interface Task {
   title: string;
   project_id: string;
   status: 'pending' | 'running' | 'completed' | 'failed' | 'cancelled';
-  priority: 'low' | 'medium' | 'high' | 'critical';
+  /** Backend priority is integer 1-5 */
+  priority: number | 'low' | 'medium' | 'high' | 'critical' | 'urgent';
   agent?: { id: string; name: string; handle?: string } | null;
   estimated_cost?: number;
   actual_cost?: number;
@@ -108,8 +109,10 @@ const getProjectTypeDot = (type: string) => {
   }
 };
 
-const getPriorityColor = (priority: string) => {
-  switch (priority) {
+const getPriorityColor = (priority: number | string) => {
+  const label = getPriorityLabel(priority);
+  switch (label) {
+    case 'urgent': return 'text-purple-400';
     case 'critical': return 'text-red-400';
     case 'high': return 'text-orange-400';
     case 'medium': return 'text-yellow-400';
@@ -424,7 +427,7 @@ export default function ProjectDetail() {
                         {task.status === 'completed' ? <CheckCircle2 size={12} style={{ color: '#10b981' }} /> : <Clock size={12} style={{ color: '#f59e0b' }} />}
                         <span style={{ fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--text-mid)' }}>{task.title}</span>
                       </div>
-                      <span style={{ fontFamily: 'var(--font-mono)', fontSize: 9, color: getPriorityColor(task.priority).replace('text-', '') === 'red-400' ? '#f87171' : 'var(--text-lo)', textTransform: 'uppercase' }}>{task.priority}</span>
+                      <span style={{ fontFamily: 'var(--font-mono)', fontSize: 9, color: 'var(--text-lo)', textTransform: 'uppercase' }}>{getPriorityLabel(task.priority)}</span>
                     </div>
                   ))}
                 </div>

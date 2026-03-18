@@ -770,6 +770,10 @@ async function assignTask(request, reply) {
       userId, now);
   } catch (e) { /* ignore */ }
 
+  // Update agent status: if agent now has running tasks → working, else they stay as-is
+  // (The task is still pending until started, so just update previous agent if any)
+  syncAgentStatus(db, previousAgentId);
+
   return {
     id,
     agent_id,
@@ -971,10 +975,13 @@ async function startTask(request, reply) {
   const now = new Date().toISOString();
 
   db.prepare(`
-    UPDATE tasks 
-    SET status = 'running', started_at = ?, updated_at = ? 
+    UPDATE tasks
+    SET status = 'running', started_at = ?, updated_at = ?
     WHERE id = ?
   `).run(now, now, id);
+
+  // Agent is now working — update their status
+  syncAgentStatus(db, task.agent_id);
 
   // Add system comment
   const content = comment ? `Task started. ${comment}` : 'Task started';
@@ -1035,10 +1042,13 @@ async function completeTask(request, reply) {
   const now = new Date().toISOString();
 
   db.prepare(`
-    UPDATE tasks 
-    SET status = 'completed', result = ?, completed_at = ?, updated_at = ? 
+    UPDATE tasks
+    SET status = 'completed', result = ?, completed_at = ?, updated_at = ?
     WHERE id = ?
   `).run(result ? JSON.stringify(result) : null, now, now, id);
+
+  // Check if agent has other running tasks → set idle if none remain
+  syncAgentStatus(db, task.agent_id);
 
   // Add system comment
   const content = comment ? `Task completed. ${comment}` : 'Task completed';
@@ -1127,6 +1137,9 @@ async function executeTaskRoute(request, reply) {
     // Complete the task with real AI result
     db.prepare(`UPDATE tasks SET status='completed', result=?, completed_at=?, updated_at=? WHERE id=?`)
       .run(resultText, now, now, id);
+
+    // Sync agent status — set to idle if no other running tasks
+    syncAgentStatus(db, agent.id);
 
     // Track token cost in cost_records
     if (!execResult.skipped && execResult.tokens && execResult.cost) {
@@ -1254,10 +1267,13 @@ async function cancelTask(request, reply) {
   const now = new Date().toISOString();
 
   db.prepare(`
-    UPDATE tasks 
-    SET status = 'cancelled', cancelled_at = ?, cancelled_by = ?, updated_at = ? 
+    UPDATE tasks
+    SET status = 'cancelled', cancelled_at = ?, cancelled_by = ?, updated_at = ?
     WHERE id = ?
   `).run(now, userId, now, id);
+
+  // Check if agent has other running tasks → set idle if none remain
+  syncAgentStatus(db, task.agent_id);
 
   // Add system comment
   const content = reason ? `Task cancelled. Reason: ${reason}` : 'Task cancelled';
@@ -1279,6 +1295,243 @@ async function cancelTask(request, reply) {
     cancelled_at: now,
     cancelled_by: userId,
     reason
+  };
+}
+
+// ─── Helper: update agent status based on running task count ─────────────────
+function syncAgentStatus(db, agentId) {
+  if (!agentId) return;
+  try {
+    const { count } = db.prepare(
+      "SELECT COUNT(*) as count FROM tasks WHERE agent_id = ? AND status = 'running'"
+    ).get(agentId);
+    const newStatus = count > 0 ? 'working' : 'idle';
+    db.prepare("UPDATE manager_agents SET status = ? WHERE id = ?").run(newStatus, agentId);
+  } catch (e) { /* non-critical */ }
+}
+
+// ─── Helper: priority escalation logic ───────────────────────────────────────
+function handlePriorityEscalation(db, task, newPriority, oldPriority, wsManager) {
+  const now = new Date().toISOString();
+
+  // Escalation: priority bumped to critical (4) or urgent (5)
+  if (newPriority >= 4 && oldPriority < 4) {
+    // Find idle agents on the project that are not already on a critical/urgent task
+    const idleAgents = db.prepare(`
+      SELECT ma.*
+      FROM manager_agents ma
+      JOIN agent_projects ap ON ap.agent_id = ma.id
+      WHERE ap.project_id = ?
+        AND ap.status = 'active'
+        AND ma.is_approved = 1
+        AND ma.status IN ('idle', 'online')
+        AND ma.id != ?
+        AND ma.id NOT IN (
+          SELECT DISTINCT agent_id FROM tasks
+          WHERE agent_id IS NOT NULL AND status = 'running' AND priority >= 4
+        )
+      ORDER BY ma.experience_level DESC
+      LIMIT 1
+    `).all(task.project_id, task.agent_id || '');
+
+    if (idleAgents.length > 0) {
+      const helper = idleAgents[0];
+      // Auto-create a helper sub-task
+      const { generateId } = require('./database');
+      const helperTaskId = generateId();
+      db.prepare(`
+        INSERT INTO tasks (id, project_id, agent_id, title, description, status, priority, assigned_by, assigned_at, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, 'pending', ?, NULL, ?, ?, ?)
+      `).run(
+        helperTaskId, task.project_id, helper.id,
+        `[ESCALATED ASSIST] ${task.title}`,
+        `Auto-assigned to assist with escalated task "${task.title}" (priority raised to ${newPriority >= 5 ? 'urgent' : 'critical'})`,
+        newPriority, now, now, now
+      );
+
+      // Set helper to working
+      db.prepare("UPDATE manager_agents SET status = 'working' WHERE id = ?").run(helper.id);
+
+      // WS notify
+      try {
+        wsManager.emitTaskAssigned(task.project_id, {
+          task_id: helperTaskId,
+          task_title: `[ESCALATED ASSIST] ${task.title}`,
+          project_id: task.project_id,
+          agent_id: helper.id,
+          agent_name: helper.name,
+        });
+      } catch (e) { /* ignore */ }
+
+      // Log to activity_history
+      try {
+        db.prepare(`
+          INSERT INTO activity_history (event_type, action, entity_id, entity_title, project_id, agent_id, agent_name, metadata, created_at)
+          VALUES ('task', 'escalated_assigned', ?, ?, ?, ?, ?, ?, ?)
+        `).run(task.id, task.title, task.project_id, helper.id, helper.name,
+          JSON.stringify({ new_priority: newPriority, helper_task_id: helperTaskId }), now);
+      } catch (e) { /* ignore */ }
+
+      console.log(`[Escalation] Task "${task.title}" escalated to ${newPriority >= 5 ? 'urgent' : 'critical'} → helper ${helper.name} auto-assigned`);
+    } else {
+      // No idle agent found — emit admin notification
+      try {
+        wsManager.broadcast('task:needs_agent', {
+          task_id: task.id,
+          task_title: task.title,
+          project_id: task.project_id,
+          priority: newPriority,
+          reason: 'No idle agent available for escalated task',
+        }, {});
+      } catch (e) { /* ignore */ }
+
+      // Persist admin notification
+      try {
+        const { generateId } = require('./database');
+        db.prepare(`
+          INSERT INTO agent_notifications (id, agent_id, type, title, content, data, created_at)
+          VALUES (?, NULL, 'unassigned_task', 'Escalated Task Needs Agent', ?, ?, ?)
+        `).run(
+          generateId(),
+          `Task "${task.title}" was escalated to ${newPriority >= 5 ? 'urgent' : 'critical'} but no idle agent is available.`,
+          JSON.stringify({ task_id: task.id, task_title: task.title, project_id: task.project_id, priority: newPriority }),
+          now
+        );
+      } catch (e) { /* ignore */ }
+
+      console.log(`[Escalation] Task "${task.title}" escalated — no idle agent found, admin notified`);
+    }
+  }
+
+  // De-escalation: priority lowered — release a helper agent if task has multiple running agents
+  if (newPriority < oldPriority && newPriority < 4) {
+    // Find the lowest-priority running task on this project with an agent we can reassign
+    const extraAgentTask = db.prepare(`
+      SELECT t.id as task_id, t.agent_id, t.title
+      FROM tasks t
+      WHERE t.project_id = ?
+        AND t.status = 'running'
+        AND t.agent_id IS NOT NULL
+        AND t.id != ?
+        AND t.title LIKE '[ESCALATED ASSIST]%'
+      ORDER BY t.created_at ASC
+      LIMIT 1
+    `).get(task.project_id, task.id);
+
+    if (extraAgentTask) {
+      // Cancel the escalated helper task
+      db.prepare("UPDATE tasks SET status = 'cancelled', cancelled_at = ?, updated_at = ? WHERE id = ?")
+        .run(now, now, extraAgentTask.task_id);
+
+      const releasedAgentId = extraAgentTask.agent_id;
+
+      // Update released agent status
+      syncAgentStatus(db, releasedAgentId);
+
+      // Reassign released agent to next highest-priority pending task on the project
+      const nextTask = db.prepare(`
+        SELECT id FROM tasks
+        WHERE project_id = ? AND status = 'pending' AND agent_id IS NULL
+        ORDER BY priority DESC, created_at ASC
+        LIMIT 1
+      `).get(task.project_id);
+
+      if (nextTask) {
+        db.prepare("UPDATE tasks SET agent_id = ?, assigned_at = ?, updated_at = ? WHERE id = ?")
+          .run(releasedAgentId, now, now, nextTask.id);
+        db.prepare("UPDATE manager_agents SET status = 'working' WHERE id = ?").run(releasedAgentId);
+
+        try {
+          wsManager.emitTaskAssigned(task.project_id, {
+            task_id: nextTask.id,
+            agent_id: releasedAgentId,
+            project_id: task.project_id,
+          });
+        } catch (e) { /* ignore */ }
+
+        console.log(`[De-escalation] Released helper agent ${releasedAgentId} → reassigned to task ${nextTask.id}`);
+      } else {
+        console.log(`[De-escalation] Released helper agent ${releasedAgentId} → no pending tasks, set idle`);
+      }
+
+      // Log to activity_history
+      try {
+        db.prepare(`
+          INSERT INTO activity_history (event_type, action, entity_id, entity_title, project_id, agent_id, metadata, created_at)
+          VALUES ('task', 'deescalated', ?, ?, ?, ?, ?, ?)
+        `).run(task.id, task.title, task.project_id, releasedAgentId,
+          JSON.stringify({ old_priority: oldPriority, new_priority: newPriority }), now);
+      } catch (e) { /* ignore */ }
+    }
+  }
+}
+
+// PATCH /api/tasks/:id/priority - Update task priority with escalation logic
+async function updateTaskPriority(request, reply) {
+  const db = getDb();
+  const { id } = request.params;
+  const userId = request.user?.id;
+  const { priority } = request.body;
+
+  // Validate priority is integer 1-5
+  if (priority === undefined || !Number.isInteger(Number(priority)) || Number(priority) < 1 || Number(priority) > 5) {
+    reply.code(400);
+    return { error: 'priority must be an integer between 1 and 5' };
+  }
+  const newPriority = Number(priority);
+
+  const task = db.prepare(`
+    SELECT t.*, p.name as project_name
+    FROM tasks t
+    JOIN projects p ON t.project_id = p.id
+    WHERE t.id = ?
+  `).get(id);
+
+  if (!task) {
+    reply.code(404);
+    return { error: 'Task not found' };
+  }
+
+  const oldPriority = task.priority;
+  const now = new Date().toISOString();
+
+  // Update priority
+  db.prepare('UPDATE tasks SET priority = ?, updated_at = ? WHERE id = ?').run(newPriority, now, id);
+
+  // Emit WS event
+  wsManager.broadcast('task:priority_changed', {
+    task_id: id,
+    task_title: task.title,
+    project_id: task.project_id,
+    old_priority: oldPriority,
+    new_priority: newPriority,
+    changed_by: userId,
+  }, {});
+
+  // Log to activity_history
+  try {
+    db.prepare(`
+      INSERT INTO activity_history (event_type, action, entity_id, entity_title, project_id, project_name, user_id, metadata, created_at)
+      VALUES ('task', 'priority_changed', ?, ?, ?, ?, ?, ?, ?)
+    `).run(id, task.title, task.project_id, task.project_name, userId,
+      JSON.stringify({ old_priority: oldPriority, new_priority: newPriority }), now);
+  } catch (e) { /* ignore */ }
+
+  // Trigger escalation/de-escalation logic
+  if (oldPriority !== newPriority) {
+    try {
+      handlePriorityEscalation(db, task, newPriority, oldPriority, wsManager);
+    } catch (e) {
+      console.error('[Priority Escalation] Error:', e.message);
+    }
+  }
+
+  return {
+    id,
+    old_priority: oldPriority,
+    new_priority: newPriority,
+    updated_at: now,
+    updated_by: userId
   };
 }
 
@@ -4782,6 +5035,7 @@ module.exports = {
   getAgentTasks,
   getMyTasks,
   searchTasks,
+  updateTaskPriority,
 
   // Legacy Costs
   getCosts,

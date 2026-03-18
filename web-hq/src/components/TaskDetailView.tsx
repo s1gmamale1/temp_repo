@@ -17,7 +17,7 @@ import {
   Reply,
   Users
 } from 'lucide-react';
-import { tasksApi, type Task, type TaskUpdate } from '../services/api';
+import { tasksApi, getPriorityLabel, type Task, type TaskUpdate } from '../services/api';
 import AssignmentReplyPanel from './AssignmentReplyPanel';
 import { toast } from './Toast';
 
@@ -155,7 +155,9 @@ export default function TaskDetailView({ task, projectName, onClose, onUpdate, o
   };
 
   const getPriorityColor = (priority: Task['priority']) => {
-    switch (priority) {
+    const label = getPriorityLabel(priority);
+    switch (label) {
+      case 'urgent': return 'text-purple-400 bg-purple-500/20 border-purple-500/30';
       case 'critical': return 'text-red-400 bg-red-500/20 border-red-500/30';
       case 'high': return 'text-orange-400 bg-orange-500/20 border-orange-500/30';
       case 'medium': return 'text-yellow-400 bg-yellow-500/20 border-yellow-500/30';
@@ -200,7 +202,7 @@ export default function TaskDetailView({ task, projectName, onClose, onUpdate, o
           <div className="flex-1 min-w-0 pr-4">
             <div className="flex items-center gap-2 mb-1">
               <span className={`px-2 py-0.5 text-xs font-medium rounded-full border ${getPriorityColor(task.priority)}`}>
-                {task.priority.toUpperCase()}
+                {getPriorityLabel(task.priority).toUpperCase()}
               </span>
               <span className={`flex items-center gap-1 px-2 py-0.5 text-xs font-medium rounded-full ${statusConfig.bg} ${statusConfig.color}`}>
                 <StatusIcon className={`w-3 h-3 ${task.status === 'running' ? 'animate-spin' : ''}`} />

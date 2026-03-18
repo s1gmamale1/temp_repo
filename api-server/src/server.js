@@ -291,6 +291,18 @@ async function buildServer() {
   // Cancel task
   fastify.post('/api/tasks/:id/cancel', { preHandler: authMiddleware }, routes.cancelTask);
 
+  // Update task priority (with escalation logic)
+  fastify.patch('/api/tasks/:id/priority', {
+    preHandler: authMiddleware,
+    schema: {
+      body: {
+        type: 'object',
+        required: ['priority'],
+        properties: { priority: { type: 'integer', minimum: 1, maximum: 5 } }
+      }
+    }
+  }, routes.updateTaskPriority);
+
   // Add comment
   fastify.post('/api/tasks/:id/comments', {
     preHandler: authMiddleware,

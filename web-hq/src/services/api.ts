@@ -131,7 +131,8 @@ export interface Task {
   description: string;
   project_id: string;
   status: 'pending' | 'running' | 'completed' | 'failed' | 'cancelled';
-  priority: 'low' | 'medium' | 'high' | 'critical';
+  /** Backend stores priority as integer 1-5: 1=low, 2=medium, 3=high, 4=critical, 5=urgent */
+  priority: number | 'low' | 'medium' | 'high' | 'critical' | 'urgent';
   created_by: string;
   created_at: string;
   updated_at: string;
@@ -154,6 +155,30 @@ export interface Task {
   };
 }
 
+/**
+ * Convert a task priority value (integer 1-5 or legacy string) to a human-readable label.
+ * Backend stores priority as integer: 1=low, 2=medium, 3=high, 4=critical, 5=urgent
+ */
+export function getPriorityLabel(priority: number | string): string {
+  if (typeof priority === 'number') {
+    const labels: Record<number, string> = { 1: 'low', 2: 'medium', 3: 'high', 4: 'critical', 5: 'urgent' };
+    return labels[priority] || 'medium';
+  }
+  // Legacy string passthrough
+  const normalized = String(priority).toLowerCase();
+  if (['low', 'medium', 'high', 'critical', 'urgent'].includes(normalized)) return normalized;
+  return 'medium';
+}
+
+/**
+ * Convert a priority label string to its numeric backend value.
+ */
+export function getPriorityValue(priority: number | string): number {
+  if (typeof priority === 'number') return Math.max(1, Math.min(5, priority));
+  const map: Record<string, number> = { low: 1, medium: 2, high: 3, critical: 4, urgent: 5 };
+  return map[String(priority).toLowerCase()] ?? 2;
+}
+
 export interface TaskUpdate {
   id: string;
   task_id: string;
@@ -171,7 +196,8 @@ export const tasksApi = {
   create: (projectId: string, data: {
     title: string;
     description?: string;
-    priority?: 'low' | 'medium' | 'high' | 'critical';
+    /** Priority as integer 1-5 or legacy string label */
+    priority?: number | 'low' | 'medium' | 'high' | 'critical' | 'urgent';
     due_date?: string;
     estimated_hours?: number;
     tags?: string[];
@@ -245,6 +271,13 @@ export const tasksApi = {
   // Add comment to task
   addComment: (taskId: string, content: string) =>
     fetchApi(`/api/tasks/${taskId}/comments`, { method: 'POST', body: JSON.stringify({ content }) }),
+
+  // Update task priority (triggers escalation logic on backend)
+  updatePriority: (taskId: string, priority: number) =>
+    fetchApi(`/api/tasks/${taskId}/priority`, {
+      method: 'PATCH',
+      body: JSON.stringify({ priority })
+    }),
 };
 
 // Costs API

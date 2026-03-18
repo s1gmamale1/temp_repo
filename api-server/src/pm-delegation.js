@@ -37,6 +37,9 @@ const ROLE_KEYWORDS = {
 // Auth is special — both backend and security cover it; backend wins if no security worker
 const AUTH_KEYWORDS = ['auth', 'login', 'signup', 'register', 'oauth', 'mfa', 'jwt', 'password'];
 
+// Experience level ordering for senior preference
+const EXPERIENCE_RANK = { expert: 4, senior: 3, mid: 2, junior: 1 };
+
 /**
  * Score a worker agent for a given task title.
  * Returns 0-100 where higher = better match.
@@ -63,20 +66,50 @@ function scoreWorker(taskTitle, worker) {
 
 /**
  * Pick the best worker for a task from the available pool.
- * Uses score + load balancing (fewest assigned tasks wins on tie).
+ * Applies:
+ *   - Status preference: idle/online > working
+ *   - Experience preference for high/critical priority tasks: senior > mid > junior
+ *   - Load balancing: skip agents with 3+ running tasks; penalise loaded agents
+ *
+ * @param {string}  taskTitle
+ * @param {Array}   workers       - full worker rows from manager_agents
+ * @param {object}  taskCounts    - { agentId: number } batch-assignment count
+ * @param {number}  taskPriority  - task priority integer (1-5)
+ * @param {object}  db            - better-sqlite3 instance (for live running-task counts)
  */
-function pickWorker(taskTitle, workers, taskCounts) {
+function pickWorker(taskTitle, workers, taskCounts, taskPriority, db) {
   if (!workers.length) return null;
+
+  // Filter out overloaded agents (3+ running tasks)
+  const available = workers.filter(w => {
+    const runningCount = db
+      ? (db.prepare("SELECT COUNT(*) as c FROM tasks WHERE agent_id = ? AND status = 'running'").get(w.id)?.c || 0)
+      : 0;
+    return runningCount < 3;
+  });
+
+  // If all agents are overloaded, fall back to the full pool to avoid leaving tasks unassigned
+  const pool = available.length > 0 ? available : workers;
 
   let best = null;
   let bestScore = -1;
 
-  for (const w of workers) {
-    const score = scoreWorker(taskTitle, w);
-    const load  = taskCounts[w.id] || 0;
+  for (const w of pool) {
+    const keywordScore = scoreWorker(taskTitle, w);
+    const load = taskCounts[w.id] || 0;
+
+    // Status preference: idle/online agents get a bonus
+    const statusBonus = (w.status === 'idle' || w.status === 'online') ? 5 : 0;
+
+    // Experience preference for high-priority (>= 3) tasks
+    let experienceBonus = 0;
+    if (taskPriority >= 3) {
+      const expLevel = (w.experience_level || '').toLowerCase();
+      experienceBonus = (EXPERIENCE_RANK[expLevel] || 0) * 2;
+    }
 
     // Normalise load into a small penalty (max 5 tasks = -0.5 score)
-    const effective = score - (load * 0.1);
+    const effective = keywordScore + statusBonus + experienceBonus - (load * 0.1);
 
     if (effective > bestScore) {
       bestScore = effective;
@@ -102,6 +135,7 @@ function delegateTasksToWorkers(projectId, tasks, pmAgentId, db, wsManager) {
   if (!tasks.length) return [];
 
   // Get all approved WORKER agents on this project (exclude PM and R&D)
+  // Prefer idle/online agents — ORDER BY status so idle comes first
   const workers = db.prepare(`
     SELECT ma.*
     FROM manager_agents ma
@@ -111,6 +145,7 @@ function delegateTasksToWorkers(projectId, tasks, pmAgentId, db, wsManager) {
       AND ma.is_approved = 1
       AND ma.agent_type = 'worker'
       AND ma.id != ?
+    ORDER BY CASE ma.status WHEN 'idle' THEN 0 WHEN 'online' THEN 1 ELSE 2 END ASC
   `).all(projectId, pmAgentId);
 
   if (!workers.length) {
@@ -128,14 +163,37 @@ function delegateTasksToWorkers(projectId, tasks, pmAgentId, db, wsManager) {
   const assignments = [];
 
   for (const task of tasks) {
-    const worker = pickWorker(task.title, workers, taskCounts);
-    if (!worker) continue;
+    const taskPriority = task.priority || 2;
+    const worker = pickWorker(task.title, workers, taskCounts, taskPriority, db);
+
+    if (!worker) {
+      // No suitable worker — create admin notification
+      try {
+        const notifId = require('./database').generateId();
+        db.prepare(`
+          INSERT INTO agent_notifications (id, agent_id, type, title, content, data, created_at)
+          VALUES (?, NULL, 'unassigned_task', 'Task needs assignment', ?, ?, ?)
+        `).run(
+          notifId,
+          `Task "${task.title}" could not be auto-assigned — no eligible worker found.`,
+          JSON.stringify({ task_id: task.id, task_title: task.title, project_id: projectId }),
+          now
+        );
+      } catch (e) { /* ignore */ }
+      console.log(`[PM Delegation] No suitable worker for "${task.title}" — admin notified`);
+      continue;
+    }
 
     // Assign task to worker in DB (assigned_by is NULL — automated PM delegation, no direct user)
     db.prepare(`UPDATE tasks SET agent_id = ?, assigned_by = NULL, assigned_at = ?, updated_at = ? WHERE id = ?`)
       .run(worker.id, now, now, task.id);
 
     taskCounts[worker.id] = (taskCounts[worker.id] || 0) + 1;
+
+    // Update worker status to 'working'
+    try {
+      db.prepare("UPDATE manager_agents SET status = 'working' WHERE id = ?").run(worker.id);
+    } catch (e) { /* ignore */ }
 
     // Create agent notification for the worker
     try {
