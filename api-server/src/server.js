@@ -51,6 +51,10 @@ const NODE_ENV = config.NODE_ENV;
 const SERVER_START_TIME = Date.now();
 
 async function buildServer() {
+  // Run env safety checks (warns on misconfigured provider/secret, non-fatal)
+  const { runEnvChecks } = require('./env-check');
+  runEnvChecks(fastify.log);
+
   // Initialize Sentry error tracking (optional — needs SENTRY_DSN)
   initSentry();
 
