@@ -59,16 +59,14 @@ export default function TaskList({ projectId, projectName }: TaskListProps) {
 
   const getStatusBadge = (status: Task['status']) => {
     switch (status) {
-      case 'draft':
-        return { icon: Circle, class: 'bg-slate-500/20 text-slate-400 border-slate-500/30', label: 'Draft' };
       case 'pending':
         return { icon: Clock, class: 'bg-yellow-500/20 text-yellow-400 border-yellow-500/30', label: 'Pending' };
-      case 'assigned':
-        return { icon: User, class: 'bg-blue-500/20 text-blue-400 border-blue-500/30', label: 'Assigned' };
-      case 'in_progress':
-        return { icon: Loader2, class: 'bg-indigo-500/20 text-indigo-400 border-indigo-500/30', label: 'In Progress' };
+      case 'running':
+        return { icon: Loader2, class: 'bg-indigo-500/20 text-indigo-400 border-indigo-500/30', label: 'Running' };
       case 'completed':
         return { icon: CheckCircle2, class: 'bg-green-500/20 text-green-400 border-green-500/30', label: 'Completed' };
+      case 'failed':
+        return { icon: AlertCircle, class: 'bg-orange-500/20 text-orange-400 border-orange-500/30', label: 'Failed' };
       case 'cancelled':
         return { icon: AlertCircle, class: 'bg-red-500/20 text-red-400 border-red-500/30', label: 'Cancelled' };
       default:
@@ -97,11 +95,11 @@ export default function TaskList({ projectId, projectName }: TaskListProps) {
     task.description?.toLowerCase().includes(searchQuery.toLowerCase())
   );
 
-  const formatDate = (dateStr?: string) => {
+  const formatDate = (dateStr: string | undefined, status: Task['status']) => {
     if (!dateStr) return 'No due date';
     const date = new Date(dateStr);
     const now = new Date();
-    const isOverdue = date < now && !['completed', 'cancelled'].includes(task.status);
+    const isOverdue = date < now && !['completed', 'cancelled'].includes(status);
     
     return (
       <span className={isOverdue ? 'text-red-400' : 'text-slate-400'}>
@@ -119,7 +117,7 @@ export default function TaskList({ projectId, projectName }: TaskListProps) {
           <div>
             <h2 className="text-xl font-semibold text-slate-50">Tasks</h2>
             <p className="text-sm text-slate-400">
-              {tasks.length} total • {tasks.filter(t => t.status === 'in_progress').length} in progress
+              {tasks.length} total • {tasks.filter(t => t.status === 'running').length} running
             </p>
           </div>
           <button
@@ -151,11 +149,11 @@ export default function TaskList({ projectId, projectName }: TaskListProps) {
               className="px-3 py-2 bg-slate-800 border border-slate-700 rounded-lg text-slate-200 focus:outline-none focus:ring-2 focus:ring-primary/50"
             >
               <option value="">All Status</option>
-              <option value="draft">Draft</option>
               <option value="pending">Pending</option>
-              <option value="assigned">Assigned</option>
-              <option value="in_progress">In Progress</option>
+              <option value="running">Running</option>
               <option value="completed">Completed</option>
+              <option value="failed">Failed</option>
+              <option value="cancelled">Cancelled</option>
             </select>
             
             <select
@@ -242,7 +240,7 @@ export default function TaskList({ projectId, projectName }: TaskListProps) {
                     <div className="flex items-center gap-4 mt-2 text-xs text-slate-400">
                       <span className="flex items-center gap-1">
                         <Calendar className="w-3 h-3" />
-                        {formatDate(task.due_date)}
+                        {formatDate(task.due_date, task.status)}
                       </span>
                       {task.estimated_hours && (
                         <span className="flex items-center gap-1">
@@ -265,7 +263,7 @@ export default function TaskList({ projectId, projectName }: TaskListProps) {
                   {/* Status Badge */}
                   <div className="hidden sm:flex items-center gap-2">
                     <span className={`flex items-center gap-1.5 px-3 py-1.5 text-sm font-medium rounded-full border ${statusBadge.class}`}>
-                      <StatusIcon className={`w-4 h-4 ${task.status === 'in_progress' ? 'animate-spin' : ''}`} />
+                      <StatusIcon className={`w-4 h-4 ${task.status === 'running' ? 'animate-spin' : ''}`} />
                       {statusBadge.label}
                     </span>
                   </div>
@@ -306,8 +304,8 @@ export default function TaskList({ projectId, projectName }: TaskListProps) {
       {/* Create Task Form */}
       {showCreateForm && (
         <TaskCreationForm
-          projectId={projectId}
-          projectName={projectName}
+          projects={[{ id: projectId, name: projectName }]}
+          defaultProjectId={projectId}
           onClose={() => setShowCreateForm(false)}
           onCreated={fetchTasks}
         />

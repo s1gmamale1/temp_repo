@@ -166,7 +166,7 @@ export default function TaskDetailView({ task, projectName, onClose, onUpdate, o
 
   const statusConfig = getStatusConfig(task.status);
   const StatusIcon = statusConfig.icon;
-  const canPostUpdate = ['assigned', 'in_progress', 'running'].includes(task.status);
+  const canPostUpdate = ['pending', 'running'].includes(task.status);
 
   const formatDate = (dateStr: string) => {
     const date = new Date(dateStr);
@@ -203,7 +203,7 @@ export default function TaskDetailView({ task, projectName, onClose, onUpdate, o
                 {task.priority.toUpperCase()}
               </span>
               <span className={`flex items-center gap-1 px-2 py-0.5 text-xs font-medium rounded-full ${statusConfig.bg} ${statusConfig.color}`}>
-                <StatusIcon className={`w-3 h-3 ${task.status === 'in_progress' ? 'animate-spin' : ''}`} />
+                <StatusIcon className={`w-3 h-3 ${task.status === 'running' ? 'animate-spin' : ''}`} />
                 {task.status.replace('_', ' ')}
               </span>
             </div>

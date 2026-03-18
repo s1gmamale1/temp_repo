@@ -80,6 +80,14 @@ export async function fetchApi(endpoint: string, options?: RequestInit) {
     }
     console.error(`[fetchApi] Error ${response.status} for ${endpoint}:`, error);
 
+    // Auto-logout on 401 — stale/expired token
+    if (response.status === 401) {
+      localStorage.removeItem('claw_token');
+      localStorage.removeItem('claw_user');
+      window.location.href = '/login';
+      throw new Error(error.error || 'Unauthorized');
+    }
+
     // Dispatch a global event for toast notifications
     window.dispatchEvent(new CustomEvent('api-error', {
       detail: { message: error.error || `HTTP ${response.status}`, status: response.status }
@@ -130,6 +138,7 @@ export interface Task {
   due_date?: string;
   estimated_hours?: number;
   tags?: string[];
+  labels?: string[];
   assigned_agent?: {
     id: string;
     name: string;
@@ -419,6 +428,7 @@ export interface Agent {
   is_active: boolean;
   avatar_url?: string;
   created_at: string;
+  rnd_last_run?: string | null;
   // Legacy field support
   experience?: string;
 }
