@@ -1,3 +1,4 @@
+require('dotenv').config();
 const fastify = require('fastify')({
   logger: {
     level: process.env.LOG_LEVEL || 'info',
