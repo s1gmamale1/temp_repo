@@ -8,8 +8,9 @@ Fastify + SQLite backend for the PROJECT-CLAW dashboard.
 # Install dependencies
 npm install
 
-# Seed the database with mock data
-npm run seed
+# (Optional) Switch AI provider profile before starting:
+npm run env:local   # local Ollama only (no cloud key needed)
+npm run env:hybrid  # Ollama with OpenRouter fallback
 
 # Start development server (with auto-reload)
 npm run dev

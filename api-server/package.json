@@ -14,7 +14,9 @@
     "lint": "eslint src/",
     "migrate": "node scripts/migrate.js",
     "migrate:pg": "node scripts/migrate-to-postgres.js",
-    "sync:costs": "node -e \"require('./src/database').initDatabase().then(() => require('./src/openrouter').syncOpenRouterUsage().then(console.log).catch(console.error))\""
+    "sync:costs": "node -e \"require('./src/database').initDatabase().then(() => require('./src/openrouter').syncOpenRouterUsage().then(console.log).catch(console.error))\"",
+    "env:local": "node scripts/switch-env-profile.js local-ollama",
+    "env:hybrid": "node scripts/switch-env-profile.js hybrid-auto"
   },
   "keywords": [
     "fastify",
