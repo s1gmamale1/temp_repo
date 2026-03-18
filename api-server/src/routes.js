@@ -2114,7 +2114,7 @@ async function createOrGetDmRoute(request, reply) {
   db.prepare(`
     INSERT INTO channels (id, name, type, is_dm, dm_user_id, dm_agent_id, created_by, created_at)
     VALUES (?, ?, 'dm', 1, ?, ?, ?, ?)
-  `).run(id, dmName, agent_id ? null : userId, agent_id || null, currentUserId, now);
+  `).run(id, dmName, agent_id ? currentUserId : userId, agent_id || null, currentUserId, now);
 
   // Add creator as member
   try {

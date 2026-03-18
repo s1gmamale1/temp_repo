@@ -314,7 +314,7 @@ async function spawnAgentResponse(userId, message, channel, agentId = null) {
   if (!targetAgentId) {
     const db = getDb();
     const defaultAgent = db.prepare(`
-      SELECT * FROM agents WHERE is_active = 1 ORDER BY created_at LIMIT 1
+      SELECT * FROM manager_agents WHERE is_approved = 1 AND status = 'online' ORDER BY created_at LIMIT 1
     `).get();
     if (defaultAgent) targetAgentId = defaultAgent.id;
   }

@@ -52,7 +52,7 @@ async function spawnSubAgent(options) {
   const { agentId, userId, message, channel, context = {} } = options;
   const db = getDb();
 
-  const agent = db.prepare('SELECT * FROM agents WHERE id = ?').get(agentId);
+  const agent = db.prepare('SELECT * FROM manager_agents WHERE id = ?').get(agentId);
   if (!agent) throw new Error(`Agent ${agentId} not found`);
 
   const user = db.prepare('SELECT * FROM users WHERE id = ?').get(userId);

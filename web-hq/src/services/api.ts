@@ -286,7 +286,7 @@ export const chatApi = {
   },
 
   createOrGetDm: (userId: string, agentId?: string) => {
-    return fetchApi(`/api/dm/${userId}`, {
+    return fetchApi(`/api/channels/dm/${userId}`, {
       method: 'POST',
       body: JSON.stringify(agentId ? { agent_id: agentId } : {})
     });
