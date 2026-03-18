@@ -189,7 +189,37 @@ function isMentioned(content) {
 }
 
 // ── LLM chat reply ────────────────────────────────────────────────────────────
-function callLLM(messages) {
+const OLLAMA_BASE = process.env.OLLAMA_BASE_URL || 'http://localhost:11434';
+const OLLAMA_MODEL = process.env.OLLAMA_MODEL_WORKER || 'qwen2.5-coder:7b';
+
+function callOllama(messages) {
+    return new Promise(resolve => {
+        const body = JSON.stringify({ model: OLLAMA_MODEL, messages, stream: false });
+        const u = new URL(`${OLLAMA_BASE}/api/chat`);
+        const lib = u.protocol === 'https:' ? https : http;
+        const r = lib.request({
+            hostname: u.hostname,
+            port: u.port || (u.protocol === 'https:' ? 443 : 80),
+            path: u.pathname,
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) },
+        }, res => {
+            let data = '';
+            res.on('data', c => data += c);
+            res.on('end', () => {
+                try { resolve(JSON.parse(data).message?.content || null); }
+                catch { resolve(null); }
+            });
+        });
+        // Cold-start model loads can take a while on local hardware
+        r.setTimeout(45000, () => { r.destroy(); resolve(null); });
+        r.on('error', () => resolve(null));
+        r.write(body);
+        r.end();
+    });
+}
+
+function callOpenRouter(messages) {
     const apiKey = process.env.OPENROUTER_API_KEY;
     if (!apiKey) return Promise.resolve(null);
 
@@ -224,6 +254,16 @@ function callLLM(messages) {
         r.write(body);
         r.end();
     });
+}
+
+async function callLLM(messages) {
+    const provider = (process.env.AI_PROVIDER || 'auto').toLowerCase();
+    if (provider === 'ollama') return callOllama(messages);
+    if (provider === 'openrouter') return callOpenRouter(messages);
+    // auto: try Ollama first, fall back to OpenRouter
+    const ollamaReply = await callOllama(messages);
+    if (ollamaReply !== null) return ollamaReply;
+    return callOpenRouter(messages);
 }
 
 function buildChatPrompt(taskMemory) {
@@ -464,8 +504,8 @@ async function main() {
                     callLLM(messages).then(reply => {
                         const text = reply || (
                             taskMemory.size > 0
-                                ? `I'm currently working on ${taskMemory.size} task(s). (Set OPENROUTER_API_KEY for AI replies.)`
-                                : `Online and standing by. (Set OPENROUTER_API_KEY for AI replies.)`
+                                ? `I'm currently working on ${taskMemory.size} task(s). (No AI model available for replies.)`
+                                : `Online and standing by. (No AI model available for replies.)`
                         );
                         log('CHAT', `↩ Replying in #${data?.channel_name || channelId}`, C.G);
                         sendMessage(channelId, text, userToken, agentId);
