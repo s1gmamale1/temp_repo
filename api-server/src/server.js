@@ -558,6 +558,19 @@ async function buildServer() {
   fastify.get('/api/rnd/:id/findings', { preHandler: authMiddleware }, routes.getRndFindingsRoute);
 
   // ============================================================================
+  // ORCHESTRATION ENGINE ROUTES
+  // ============================================================================
+  fastify.post('/api/orchestration/sweep', { preHandler: authMiddleware }, async (request, reply) => {
+    if (request.user?.role !== 'admin') {
+      reply.code(403);
+      return { error: 'Admin only' };
+    }
+    const { runAutoAssignmentSweep } = require('./orchestration-engine');
+    const result = runAutoAssignmentSweep();
+    return result;
+  });
+
+  // ============================================================================
   // PRESET ROUTES
   // ============================================================================
   fastify.get('/api/presets', routes.listPresetsRoute);

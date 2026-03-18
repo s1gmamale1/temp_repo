@@ -407,6 +407,18 @@ async function createTask(request, reply) {
 
   wsManager.emitTaskCreated(project_id, task);
 
+  // Best-effort auto-assign for unassigned tasks (non-blocking, never delays response)
+  if (!agent_id) {
+    setImmediate(() => {
+      try {
+        const { autoAssignTask } = require('./orchestration-engine');
+        autoAssignTask(id, { assignedBy: userId });
+      } catch (e) {
+        console.error('[Orchestration] Auto-assign hook error:', e.message);
+      }
+    });
+  }
+
   // Send DM notification if task assigned
   let dmChannelId = null;
   if (agent_id) {
