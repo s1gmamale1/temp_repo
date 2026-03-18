@@ -166,8 +166,7 @@ export default function TaskDetailView({ task, projectName, onClose, onUpdate, o
 
   const statusConfig = getStatusConfig(task.status);
   const StatusIcon = statusConfig.icon;
-  const isPendingAssignment = task.status === 'pending' && task.assignment?.status === 'pending';
-  const canPostUpdate = ['assigned', 'in_progress'].includes(task.status);
+  const canPostUpdate = ['assigned', 'in_progress', 'running'].includes(task.status);
 
   const formatDate = (dateStr: string) => {
     const date = new Date(dateStr);
@@ -257,7 +256,7 @@ export default function TaskDetailView({ task, projectName, onClose, onUpdate, o
           )}
 
           {/* Labels/Tags */}
-          {(task.labels || task.tags) && (task.labels?.length || task.tags?.length) > 0 && (
+          {((task.labels?.length ?? 0) + (task.tags?.length ?? 0)) > 0 && (
             <div className="flex items-center gap-2">
               <Tag className="w-4 h-4 text-slate-500" />
               <div className="flex flex-wrap gap-1">

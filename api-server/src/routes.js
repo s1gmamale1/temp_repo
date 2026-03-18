@@ -1795,9 +1795,36 @@ async function getModelCostsRoute(request, reply) {
 
 // GET /api/costs/credits - OpenRouter credits
 async function getCreditsRoute(request, reply) {
+  if (!process.env.OPENROUTER_API_KEY) {
+    return { credits: null, usage: null, message: 'OPENROUTER_API_KEY not configured' };
+  }
   try {
     const result = await fetchOpenRouterCredits();
     return result;
+  } catch (err) {
+    reply.code(500);
+    return { error: err.message };
+  }
+}
+
+async function getCostsByAgentRoute(request, reply) {
+  const db = getDb();
+  try {
+    const rows = db.prepare(`
+      SELECT
+        c.agent_id,
+        ma.name   AS agent_name,
+        ma.handle AS agent_handle,
+        ma.agent_type,
+        COUNT(*)                         AS task_count,
+        COALESCE(SUM(c.cost_usd), 0)     AS total_cost,
+        COALESCE(SUM(c.total_tokens), 0) AS total_tokens
+      FROM costs c
+      LEFT JOIN manager_agents ma ON ma.id = c.agent_id
+      GROUP BY c.agent_id
+      ORDER BY total_cost DESC
+    `).all();
+    return { agents: rows };
   } catch (err) {
     reply.code(500);
     return { error: err.message };
@@ -4750,6 +4777,7 @@ module.exports = {
   getBudgetVsActualRoute,
   getModelCostsRoute,
   getCreditsRoute,
+  getCostsByAgentRoute,
 
   // Token Dashboard (Legacy)
   getTokenDashboardRoute,
