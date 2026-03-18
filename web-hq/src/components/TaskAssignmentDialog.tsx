@@ -41,10 +41,13 @@ export default function TaskAssignmentDialog({ taskId, taskTitle, onClose, onAss
             const taskData = await fetchApi(`/api/agents/${agent.id}/tasks?status=running&limit=50`);
             currentTasks = (taskData.tasks || []).length;
           } catch { }
+          const availability: AgentWithAvailability['availability'] =
+            agent.status === 'online' ? 'available' :
+            agent.status === 'working' ? 'busy' : 'offline';
+
           return {
             ...agent,
-            availability: agent.status === 'online' ? 'available' :
-              agent.status === 'working' ? 'busy' : 'offline',
+            availability,
             currentTasks,
           };
         })

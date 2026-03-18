@@ -19,7 +19,15 @@ const TABS = [
 type Tab = typeof TABS[number]['id'];
 
 // ── Progress data ───────────────────────────────────────────────────────────
-const PROJECT_PHASES = [
+type PhaseStatus = 'completed' | 'in_progress' | 'planned';
+interface ProjectPhase {
+  name: string;
+  status: PhaseStatus;
+  progress: number;
+  items: Array<{ name: string; done: boolean }>;
+}
+
+const PROJECT_PHASES: ProjectPhase[] = [
   {
     name: 'Foundation',
     status: 'completed' as const,

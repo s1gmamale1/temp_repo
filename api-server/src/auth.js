@@ -334,16 +334,18 @@ async function authMiddleware(request, reply) {
   const authHeader = request.headers.authorization;
 
   if (!authHeader || !authHeader.startsWith('Bearer ')) {
-    reply.code(401);
-    throw new Error('Unauthorized - No token provided');
+    const err = new Error('Unauthorized - No token provided');
+    err.statusCode = 401;
+    throw err;
   }
 
   const token = authHeader.substring(7);
   const user = await getUserByToken(token);
 
   if (!user) {
-    reply.code(401);
-    throw new Error('Unauthorized - Invalid or expired token');
+    const err = new Error('Unauthorized - Invalid or expired token');
+    err.statusCode = 401;
+    throw err;
   }
 
   // Attach user to request
@@ -372,8 +374,9 @@ async function adminMiddleware(request, reply) {
   await authMiddleware(request, reply);
 
   if (request.user.role !== 'admin') {
-    reply.code(403);
-    throw new Error('Forbidden - Admin access required');
+    const err = new Error('Forbidden - Admin access required');
+    err.statusCode = 403;
+    throw err;
   }
 }
 
@@ -385,8 +388,9 @@ function requireRole(...allowedRoles) {
     await authMiddleware(request, reply);
 
     if (!allowedRoles.includes(request.user.role)) {
-      reply.code(403);
-      throw new Error(`Forbidden - Required role: ${allowedRoles.join(' or ')}`);
+      const err = new Error(`Forbidden - Required role: ${allowedRoles.join(' or ')}`);
+      err.statusCode = 403;
+      throw err;
     }
   };
 }

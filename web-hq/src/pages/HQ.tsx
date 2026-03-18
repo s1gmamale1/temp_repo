@@ -26,6 +26,7 @@ interface Agent {
   project_id: string | null;
   rnd_division: string | null;
   rnd_schedule: string | null;
+  rnd_last_run: string | null;
   last_heartbeat: string | null;
   skills?: string[];
   taskCount?: number;

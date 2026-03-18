@@ -147,7 +147,7 @@ export default function Settings() {
           <div className="ops-panel p-0 overflow-hidden">
             {TABS.map(t => (
               <button key={t.id} onClick={() => setTab(t.id)} style={{
-                width: '100%', padding: '10px 14px', background: 'none', border: 'none',
+                width: '100%', padding: '10px 14px', border: 'none',
                 borderBottom: '1px solid var(--ink-4)', cursor: 'pointer',
                 display: 'flex', alignItems: 'center', gap: 8,
                 background: tab === t.id ? 'var(--amber-glow)' : 'transparent',

@@ -275,7 +275,7 @@ export default function ProjectAssignmentBoard() {
                         {/* Drop zone */}
                         <div ref={dropZoneRef} onDrop={onDrop} onDragOver={onDragOver}
                             style={{
-                                minHeight: 300, background: 'var(--ink-2)', border: `2px dashed ${dragAgent ? 'var(--amber)' : 'var(--ink-4)'}`,
+                                minHeight: 300, border: `2px dashed ${dragAgent ? 'var(--amber)' : 'var(--ink-4)'}`,
                                 borderRadius: 4, transition: 'border-color 150ms, background 150ms',
                                 background: dragAgent ? 'var(--amber-glow)' : 'var(--ink-2)',
                             }}

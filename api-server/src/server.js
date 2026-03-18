@@ -343,6 +343,20 @@ async function buildServer() {
   fastify.get('/api/costs/budget', { preHandler: authMiddleware }, routes.getBudgetVsActualRoute);
   fastify.get('/api/costs/models', { preHandler: authMiddleware }, routes.getModelCostsRoute);
   fastify.get('/api/costs/credits', { preHandler: authMiddleware }, routes.getCreditsRoute);
+  fastify.get('/api/costs/agents', { preHandler: authMiddleware }, routes.getCostsByAgentRoute);
+
+  // ============================================================================
+  // MONITORING ROUTES
+  // ============================================================================
+  const tokenMonitoring = require('./token-monitoring');
+  fastify.get('/api/monitoring/summary', { preHandler: authMiddleware }, async (req, reply) => {
+    try { return await tokenMonitoring.getDashboardSummary(); }
+    catch (err) { reply.code(500); return { error: err.message }; }
+  });
+  fastify.get('/api/monitoring/daily', { preHandler: authMiddleware }, async (req, reply) => {
+    try { return await tokenMonitoring.getDailyUsage(req.query.provider, req.query.month); }
+    catch (err) { reply.code(500); return { error: err.message }; }
+  });
 
   // ============================================================================
   // TOKEN DASHBOARD ROUTES (Legacy)

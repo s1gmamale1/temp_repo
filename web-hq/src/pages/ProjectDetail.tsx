@@ -53,12 +53,11 @@ interface Task {
 }
 
 interface ProjectAgent {
-  id: string;
-  agent_id: string;
+  assignment_id: string;
   role: 'lead' | 'contributor' | 'observer';
   status: 'active' | 'inactive' | 'pending';
-  joined_at: string;
-  agent: Agent;
+  assigned_at: string;
+  agent: Agent & { id: string };
 }
 
 const getStatusBg = (status: string) => {
@@ -239,7 +238,7 @@ export default function ProjectDetail() {
 
   const getAgentStatusColor = (status: string) => {
     switch (status) {
-      case 'active': return 'bg-green-500';
+      case 'online': return 'bg-green-500';
       case 'working': return 'bg-yellow-500';
       default: return 'bg-slate-500';
     }
@@ -360,13 +359,13 @@ export default function ProjectDetail() {
             ) : (
               <div className="space-y-2">
                 {projectAgents.map((pa) => (
-                  <div key={pa.id} className="flex items-center justify-between p-3 group" style={{ background: 'var(--ink-3)', border: '1px solid var(--ink-4)', borderRadius: 2 }}>
+                  <div key={pa.assignment_id} className="flex items-center justify-between p-3 group" style={{ background: 'var(--ink-3)', border: '1px solid var(--ink-4)', borderRadius: 2 }}>
                     <div className="flex items-center gap-3">
                       <div className="relative">
                         <div className="w-8 h-8 rounded flex items-center justify-center" style={{ background: 'var(--ink-4)' }}>
                           <Bot size={14} style={{ color: 'var(--amber)' }} />
                         </div>
-                        <div className={`absolute -bottom-0.5 -right-0.5 w-2.5 h-2.5 ${getAgentStatusColor(pa.status)} rounded-full border-2`} style={{ borderColor: 'var(--ink-3)' }} />
+                        <div className={`absolute -bottom-0.5 -right-0.5 w-2.5 h-2.5 ${getAgentStatusColor(pa.agent.status)} rounded-full border-2`} style={{ borderColor: 'var(--ink-3)' }} />
                       </div>
                       <div>
                         <div className="flex items-center gap-2">
@@ -384,22 +383,22 @@ export default function ProjectDetail() {
                       </div>
                     </div>
                     <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
-                      <button onClick={() => handleMessageAgent(pa.agent_id)} className="ops-btn" style={{ padding: '3px 8px' }} title="Message">
+                      <button onClick={() => handleMessageAgent(pa.agent.id)} className="ops-btn" style={{ padding: '3px 8px' }} title="Message">
                         <MessageSquare size={11} />
                       </button>
                       <div className="relative">
-                        <button onClick={() => setActiveMenu(activeMenu === pa.id ? null : pa.id)} className="ops-btn" style={{ padding: '3px 8px' }}>
+                        <button onClick={() => setActiveMenu(activeMenu === pa.assignment_id ? null : pa.assignment_id)} className="ops-btn" style={{ padding: '3px 8px' }}>
                           <MoreVertical size={11} />
                         </button>
-                        {activeMenu === pa.id && (
+                        {activeMenu === pa.assignment_id && (
                           <>
                             <div className="fixed inset-0 z-10" onClick={() => setActiveMenu(null)} />
                             <div className="absolute right-0 top-full mt-1 z-20 py-1" style={{ background: 'var(--ink-2)', border: '1px solid var(--ink-4)', borderRadius: 2, minWidth: 140 }}>
-                              {pa.role !== 'lead' && <button key="make-lead" onClick={() => { handleUpdateRole(pa.agent_id, 'lead'); setActiveMenu(null); }} className="w-full flex items-center gap-2 px-3 py-2 text-left" style={{ fontFamily: 'var(--font-mono)', fontSize: 11, color: '#fbbf24', background: 'none', border: 'none', cursor: 'pointer' }}><Crown size={11} /> Make Lead</button>}
-                              {pa.role !== 'contributor' && <button key="make-contributor" onClick={() => { handleUpdateRole(pa.agent_id, 'contributor'); setActiveMenu(null); }} className="w-full flex items-center gap-2 px-3 py-2 text-left" style={{ fontFamily: 'var(--font-mono)', fontSize: 11, color: '#a78bfa', background: 'none', border: 'none', cursor: 'pointer' }}><Bot size={11} /> Contributor</button>}
-                              {pa.role !== 'observer' && <button key="make-observer" onClick={() => { handleUpdateRole(pa.agent_id, 'observer'); setActiveMenu(null); }} className="w-full flex items-center gap-2 px-3 py-2 text-left" style={{ fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--text-mid)', background: 'none', border: 'none', cursor: 'pointer' }}><Eye size={11} /> Observer</button>}
+                              {pa.role !== 'lead' && <button key="make-lead" onClick={() => { handleUpdateRole(pa.agent.id, 'lead'); setActiveMenu(null); }} className="w-full flex items-center gap-2 px-3 py-2 text-left" style={{ fontFamily: 'var(--font-mono)', fontSize: 11, color: '#fbbf24', background: 'none', border: 'none', cursor: 'pointer' }}><Crown size={11} /> Make Lead</button>}
+                              {pa.role !== 'contributor' && <button key="make-contributor" onClick={() => { handleUpdateRole(pa.agent.id, 'contributor'); setActiveMenu(null); }} className="w-full flex items-center gap-2 px-3 py-2 text-left" style={{ fontFamily: 'var(--font-mono)', fontSize: 11, color: '#a78bfa', background: 'none', border: 'none', cursor: 'pointer' }}><Bot size={11} /> Contributor</button>}
+                              {pa.role !== 'observer' && <button key="make-observer" onClick={() => { handleUpdateRole(pa.agent.id, 'observer'); setActiveMenu(null); }} className="w-full flex items-center gap-2 px-3 py-2 text-left" style={{ fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--text-mid)', background: 'none', border: 'none', cursor: 'pointer' }}><Eye size={11} /> Observer</button>}
                               <div key="divider" style={{ borderTop: '1px solid var(--ink-4)', margin: '4px 0' }} />
-                              <button key="remove" onClick={() => { handleRemoveAgent(pa.agent_id); setActiveMenu(null); }} className="w-full flex items-center gap-2 px-3 py-2 text-left" style={{ fontFamily: 'var(--font-mono)', fontSize: 11, color: '#ef4444', background: 'none', border: 'none', cursor: 'pointer' }}><UserX size={11} /> Remove</button>
+                              <button key="remove" onClick={() => { handleRemoveAgent(pa.agent.id); setActiveMenu(null); }} className="w-full flex items-center gap-2 px-3 py-2 text-left" style={{ fontFamily: 'var(--font-mono)', fontSize: 11, color: '#ef4444', background: 'none', border: 'none', cursor: 'pointer' }}><UserX size={11} /> Remove</button>
                             </div>
                           </>
                         )}
@@ -422,7 +421,7 @@ export default function ProjectDetail() {
                   {projectTasks.slice(0, 4).map((task) => (
                     <div key={task.id} className="flex items-center justify-between" style={{ padding: '8px 10px', background: 'var(--ink-3)', border: '1px solid var(--ink-4)', borderRadius: 2 }}>
                       <div className="flex items-center gap-2">
-                        {task.status === 'done' ? <CheckCircle2 size={12} style={{ color: '#10b981' }} /> : <Clock size={12} style={{ color: '#f59e0b' }} />}
+                        {task.status === 'completed' ? <CheckCircle2 size={12} style={{ color: '#10b981' }} /> : <Clock size={12} style={{ color: '#f59e0b' }} />}
                         <span style={{ fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--text-mid)' }}>{task.title}</span>
                       </div>
                       <span style={{ fontFamily: 'var(--font-mono)', fontSize: 9, color: getPriorityColor(task.priority).replace('text-', '') === 'red-400' ? '#f87171' : 'var(--text-lo)', textTransform: 'uppercase' }}>{task.priority}</span>
