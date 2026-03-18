@@ -258,12 +258,28 @@ function callOpenRouter(messages) {
 
 async function callLLM(messages) {
     const provider = (process.env.AI_PROVIDER || 'auto').toLowerCase();
-    if (provider === 'ollama') return callOllama(messages);
-    if (provider === 'openrouter') return callOpenRouter(messages);
+    if (provider === 'ollama') {
+        const reply = await callOllama(messages);
+        if (reply) log('LLM', `provider=ollama  model=${OLLAMA_MODEL}`, C.C);
+        else log('LLM', `ollama returned null — no reply`, C.Y);
+        return reply;
+    }
+    if (provider === 'openrouter') {
+        const reply = await callOpenRouter(messages);
+        if (reply) log('LLM', `provider=openrouter  model=claude-haiku-4-5`, C.C);
+        else log('LLM', `openrouter returned null — no key or error`, C.Y);
+        return reply;
+    }
     // auto: try Ollama first, fall back to OpenRouter
     const ollamaReply = await callOllama(messages);
-    if (ollamaReply !== null) return ollamaReply;
-    return callOpenRouter(messages);
+    if (ollamaReply !== null) {
+        log('LLM', `provider=ollama (auto)  model=${OLLAMA_MODEL}`, C.C);
+        return ollamaReply;
+    }
+    const orReply = await callOpenRouter(messages);
+    if (orReply) log('LLM', `provider=openrouter (auto fallback)`, C.C);
+    else log('LLM', `both Ollama and OpenRouter unavailable — using static reply`, C.Y);
+    return orReply;
 }
 
 function buildChatPrompt(taskMemory) {
@@ -492,7 +508,10 @@ async function main() {
                 if ((isDM || mentioned) && channelId) {
                     const now = Date.now();
                     const lastReply = channelCooldown.get(channelId) || 0;
-                    if (now - lastReply < 3000) return;
+                    if (now - lastReply < 3000) {
+                        log('CHAT', `↷ Cooldown active for #${data?.channel_name || channelId} — skipping reply`, C.Y);
+                        return;
+                    }
                     channelCooldown.set(channelId, now);
 
                     const systemPrompt = buildChatPrompt(taskMemory);

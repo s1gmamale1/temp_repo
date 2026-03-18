@@ -1103,6 +1103,12 @@ async function executeTaskRoute(request, reply) {
     const { executeTask } = require('./ai-executor');
     const execResult = await executeTask(task, agent, project);
 
+    // Log provider used — visible in api-server output for debugging
+    const _providerLabel = execResult.skipped
+      ? `simulation (${execResult.provider})`
+      : `${execResult.provider}${execResult.model ? `/${execResult.model}` : ''}`;
+    console.log(`[execute] task=${id} provider=${_providerLabel} tokens=${execResult.tokens?.total ?? 0} cost=$${execResult.cost?.total_cost?.toFixed(6) ?? '0.000000'}`);
+
     const now = new Date().toISOString();
     const resultText = execResult.result;
 
