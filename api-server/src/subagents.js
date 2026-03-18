@@ -5,8 +5,10 @@
 
 const { getDb, generateId } = require('./database');
 const { getOrCreateDmChannel } = require('./chat');
-const { callOpenRouter, selectModel, estimateCost, TOKEN_PRICING } = require('./ai-executor');
+const { callOpenRouter, callOllama, isOllamaReachable, selectModel, estimateCost, TOKEN_PRICING } = require('./ai-executor');
 const { storeTokenUsage } = require('./token-dashboard');
+
+const OLLAMA_DEFAULT_WORKER = process.env.OLLAMA_MODEL_WORKER || 'qwen2.5-coder:7b';
 
 // Sub-agent response tracking
 const pendingResponses = new Map();
@@ -62,13 +64,31 @@ async function spawnSubAgent(options) {
   const systemPrompt = buildSystemPrompt(persona, agent);
   const userPrompt = buildUserPrompt(user, message, channel, context);
 
-  let response;
   const apiKey = process.env.OPENROUTER_API_KEY;
+  const aiProvider = (process.env.AI_PROVIDER || 'auto').toLowerCase();
 
-  if (apiKey) {
+  // Resolve effective provider (mirrors ai-executor logic)
+  let provider = aiProvider;
+  if (provider === 'auto') {
+    if (await isOllamaReachable()) {
+      provider = 'ollama';
+    } else if (apiKey) {
+      provider = 'openrouter';
+    } else {
+      provider = 'simulation';
+    }
+  } else if (provider === 'openrouter' && !apiKey) {
+    provider = 'simulation';
+  }
+
+  let response;
+  if (provider === 'ollama') {
+    response = await callLLMOllama(systemPrompt, userPrompt, agent);
+    if (response.simulated) provider = 'simulation';
+  } else if (provider === 'openrouter') {
     response = await callLLM(systemPrompt, userPrompt, agent, apiKey);
   } else {
-    response = simulateAgentResponse(agent, message);
+    response = simulateAgentResponse(agent, message, aiProvider);
   }
 
   const responseTime = Date.now() - startTime;
@@ -80,7 +100,8 @@ async function spawnSubAgent(options) {
     model: response.model || null,
     tokens: response.tokens || null,
     cost: response.cost || null,
-    simulated: !apiKey,
+    provider,
+    simulated: provider === 'simulation',
     responseTime,
     requestId,
   };
@@ -129,6 +150,46 @@ async function callLLM(systemPrompt, userPrompt, agent, apiKey) {
   }
 }
 
+// ── LLM Call via Ollama ──────────────────────────────────────────────────────
+async function callLLMOllama(systemPrompt, userPrompt, agent) {
+  const model = agent.current_model || OLLAMA_DEFAULT_WORKER;
+
+  const messages = [
+    { role: 'system', content: systemPrompt },
+    { role: 'user', content: userPrompt },
+  ];
+
+  try {
+    const result = await callOllama(messages, model);
+
+    const content = result.message?.content || '(no response)';
+    const promptTokens = result.prompt_eval_count || 0;
+    const completionTokens = result.eval_count || 0;
+
+    try {
+      await storeTokenUsage({
+        model,
+        provider: 'ollama',
+        prompt_tokens: promptTokens,
+        completion_tokens: completionTokens,
+        cost_usd: 0,
+      });
+    } catch (e) {
+      console.error('[subagents] Failed to record Ollama token usage:', e.message);
+    }
+
+    return {
+      content,
+      model,
+      tokens: { prompt: promptTokens, completion: completionTokens, total: promptTokens + completionTokens },
+      cost: { prompt_cost: 0, completion_cost: 0, total_cost: 0, pricing: { prompt: 0, completion: 0 } },
+    };
+  } catch (err) {
+    console.error(`[subagents] Ollama call failed for ${agent.name}, falling back to simulation:`, err.message);
+    return { ...simulateAgentResponse(agent, userPrompt), simulated: true };
+  }
+}
+
 // ── Prompt Builders ─────────────────────────────────────────────────────────
 function getAgentPersona(agent) {
   // Check for custom personality in agent config
@@ -170,7 +231,7 @@ function buildUserPrompt(user, message, channel, context) {
 }
 
 // ── Simulation Fallback ─────────────────────────────────────────────────────
-function simulateAgentResponse(agent, message) {
+function simulateAgentResponse(agent, message, aiProvider) {
   const lowerMessage = (message || '').toLowerCase();
 
   // Context-aware simulated responses
@@ -197,8 +258,14 @@ function simulateAgentResponse(agent, message) {
     content = defaults[Math.floor(Math.random() * defaults.length)];
   }
 
+  const reason = aiProvider === 'openrouter'
+    ? 'no OPENROUTER_API_KEY'
+    : aiProvider === 'ollama'
+      ? 'Ollama unreachable'
+      : 'Ollama unreachable and no OPENROUTER_API_KEY';
+
   return {
-    content: `[SIMULATED] ${content}`,
+    content: `[SIMULATED — ${reason}] ${content}`,
     model: null,
     tokens: null,
     cost: null,
