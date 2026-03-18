@@ -1,0 +1,29 @@
+{
+  "version": 1,
+  "mode": "hierarchical",
+  "headOrchestrator": {
+    "name": "OpenClaw Main",
+    "scope": ["global-priority", "safety-gates", "acceptance", "cross-project-routing"]
+  },
+  "roles": {
+    "pm": {
+      "canAssignWorkers": true,
+      "crossProjectReassignmentRequiresHeadApproval": true,
+      "maxConcurrentProjects": 1
+    },
+    "worker": {
+      "canSelfAssign": false,
+      "reportsTo": "pm",
+      "canEscalateToHead": true
+    },
+    "rnd": {
+      "reportsTo": "pm",
+      "publishesFindings": true
+    }
+  },
+  "providerPolicy": {
+    "default": "ollama",
+    "fallback": "openrouter",
+    "debugExposeProvider": true
+  }
+}
