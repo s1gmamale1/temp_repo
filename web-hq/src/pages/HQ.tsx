@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import {
   DndContext, DragOverlay, useDraggable, useDroppable,
@@ -113,11 +113,24 @@ function fmtTime(ts: string | null) {
 
 // ─── Draggable Agent Card ─────────────────────────────────────────────────────
 
-function AgentCard({ agent, dragging = false, inProject = false }: { agent: Agent; dragging?: boolean; inProject?: boolean }) {
+function AgentCard({ agent, dragging = false, inProject = false, collecting = false, justJoined = false }: { agent: Agent; dragging?: boolean; inProject?: boolean; collecting?: boolean; justJoined?: boolean }) {
   const typeColor = getTypeColor(agent.agent_type);
   const dept = agent.current_mode ? DEPT_META[agent.current_mode] : null;
   const pmMode = agent.current_mode ? PM_MODES[agent.current_mode] : null;
   const isAssigned = !!agent.current_mode;
+
+  const collectingStyle = collecting ? {
+    border: `1px solid #f59e0b`,
+    borderLeft: `2px solid #f59e0b`,
+    boxShadow: '0 0 14px rgba(245,158,11,0.45)',
+    animation: 'hq-recruit-pulse 0.6s ease-in-out infinite alternate',
+  } : {};
+  const joinedStyle = justJoined ? {
+    border: `1px solid #10b981`,
+    borderLeft: `2px solid #10b981`,
+    boxShadow: '0 0 18px rgba(16,185,129,0.5)',
+    animation: 'hq-join-glow 0.4s ease-out',
+  } : {};
 
   return (
     <div style={{
@@ -130,9 +143,33 @@ function AgentCard({ agent, dragging = false, inProject = false }: { agent: Agen
       userSelect: 'none',
       opacity: dragging ? 0.5 : 1,
       boxShadow: dragging ? `0 0 20px ${typeColor}20` : 'none',
-      transition: 'border-color 120ms, box-shadow 120ms',
+      transition: 'border-color 200ms, box-shadow 200ms',
       minWidth: inProject ? 120 : 160,
+      position: 'relative',
+      ...collectingStyle,
+      ...joinedStyle,
     }}>
+      {/* Collecting overlay */}
+      {collecting && (
+        <div style={{
+          position: 'absolute', top: 0, left: 0, right: 0, bottom: 0,
+          borderRadius: 4, pointerEvents: 'none',
+          display: 'flex', alignItems: 'center', justifyContent: 'center',
+          background: 'rgba(245,158,11,0.08)',
+          zIndex: 2,
+        }}>
+          <span style={{ fontFamily: 'var(--font-mono)', fontSize: 8, color: '#f59e0b', letterSpacing: '0.12em', fontWeight: 700 }}>RECRUITING →</span>
+        </div>
+      )}
+      {justJoined && (
+        <div style={{
+          position: 'absolute', top: -8, right: -4,
+          background: '#10b981', color: '#000', fontSize: 7,
+          fontFamily: 'var(--font-mono)', fontWeight: 700, letterSpacing: '0.1em',
+          padding: '2px 5px', borderRadius: 2, pointerEvents: 'none',
+          animation: 'hq-badge-pop 0.3s ease-out',
+        }}>NEW</div>
+      )}
       {/* Header */}
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 6, marginBottom: 6 }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
@@ -201,7 +238,7 @@ function AgentCard({ agent, dragging = false, inProject = false }: { agent: Agen
 
 // ─── Draggable Wrapper ────────────────────────────────────────────────────────
 
-function DraggableAgent({ agent, inProject = false }: { agent: Agent; inProject?: boolean }) {
+function DraggableAgent({ agent, inProject = false, collecting = false, justJoined = false }: { agent: Agent; inProject?: boolean; collecting?: boolean; justJoined?: boolean }) {
   const { attributes, listeners, setNodeRef, isDragging } = useDraggable({ id: agent.id, data: { agent } });
   return (
     <div
@@ -210,7 +247,7 @@ function DraggableAgent({ agent, inProject = false }: { agent: Agent; inProject?
       {...listeners}
       style={{ touchAction: 'none', userSelect: 'none' }}
     >
-      <AgentCard agent={agent} dragging={isDragging} inProject={inProject} />
+      <AgentCard agent={agent} dragging={isDragging} inProject={inProject} collecting={collecting} justJoined={justJoined} />
     </div>
   );
 }
@@ -386,6 +423,10 @@ export default function HQ() {
   const [activity, setActivity] = useState<ActivityItem[]>([]);
   const [confirmUnload, setConfirmUnload] = useState<Agent | null>(null);
   const [presets, setPresets] = useState<PresetsResponse | null>(null);
+  const [collectingWorkers, setCollectingWorkers] = useState<Set<string>>(new Set());
+  const [newlyJoined, setNewlyJoined] = useState<Set<string>>(new Set());
+  const [recruitingProject, setRecruitingProject] = useState<string | null>(null);
+  const collectTimers = useRef<ReturnType<typeof setTimeout>[]>([]);
 
   const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 6 } }));
 
@@ -506,34 +547,67 @@ export default function HQ() {
   async function handleAssign(dept: string, model: string) {
     if (!modal) return;
     setSaving(true);
+    const targetProject = modal.project;
+    const assignedAgent = modal.agent;
+    setModal(null);
     try {
-      // 1. Update agent's mode/model/project_id
-      await fetchApi(`/api/agents/${modal.agent.id}`, {
+      // 1. Update agent mode/model
+      await fetchApi(`/api/agents/${assignedAgent.id}`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ current_mode: dept, current_model: model, project_id: modal.project.id }),
+        body: JSON.stringify({ current_mode: dept, current_model: model, project_id: targetProject.id }),
       });
-      // 2. Also create the agent_projects junction record
+
+      // 2. Assign to project — may auto-collect workers if PM
+      let collectedWorkers: { id: string; name: string }[] = [];
       try {
-        await fetchApi(`/api/projects/${modal.project.id}/assign-agent`, {
+        const resp = await fetchApi(`/api/projects/${targetProject.id}/assign-agent`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ agent_id: modal.agent.id }),
+          body: JSON.stringify({ agent_id: assignedAgent.id }),
         });
-      } catch { /* already assigned or not critical */ }
+        collectedWorkers = resp.collected_workers || [];
+      } catch { /* already assigned — ignore */ }
 
+      // 3. Move PM into project immediately
       setAgents(prev => prev.map(a =>
-        a.id === modal.agent.id
-          ? { ...a, current_mode: dept, current_model: model, project_id: modal.project.id }
+        a.id === assignedAgent.id
+          ? { ...a, current_mode: dept, current_model: model, project_id: targetProject.id }
           : a
       ));
-      pushActivity(`→ ${modal.agent.name} assigned to ${modal.project.name} as ${dept}`, 'agent');
+
+      // 4. If workers were collected — run recruitment animation
+      if (collectedWorkers.length > 0) {
+        const workerIds = new Set(collectedWorkers.map(w => w.id));
+        collectTimers.current.forEach(clearTimeout);
+
+        // Phase 1 (0ms): pulse workers in free pool
+        setCollectingWorkers(workerIds);
+        setRecruitingProject(targetProject.id);
+        pushActivity(`⚡ ${assignedAgent.name} recruiting ${collectedWorkers.length} worker${collectedWorkers.length > 1 ? 's' : ''} for ${targetProject.name}`, 'agent');
+
+        // Phase 2 (900ms): move workers into project + slide-in glow
+        const t1 = setTimeout(() => {
+          setAgents(prev => prev.map(a =>
+            workerIds.has(a.id) ? { ...a, project_id: targetProject.id } : a
+          ));
+          setNewlyJoined(workerIds);
+          setCollectingWorkers(new Set());
+          setRecruitingProject(null);
+          pushActivity(`✓ ${collectedWorkers.map(w => w.name).join(', ')} joined ${targetProject.name}`, 'agent');
+        }, 900);
+
+        // Phase 3 (2400ms): clear glow
+        const t2 = setTimeout(() => setNewlyJoined(new Set()), 2400);
+        collectTimers.current = [t1, t2];
+      } else {
+        pushActivity(`→ ${assignedAgent.name} assigned to ${targetProject.name} as ${dept}`, 'agent');
+      }
     } catch (e: any) {
       console.error(e);
       toast.error('Assignment Failed', e?.message || 'Could not assign agent');
     } finally {
       setSaving(false);
-      setModal(null);
     }
   }
 
@@ -573,6 +647,25 @@ export default function HQ() {
 
   return (
     <DndContext sensors={sensors} onDragStart={handleDragStart} onDragEnd={handleDragEnd}>
+      <style>{`
+        @keyframes hq-recruit-pulse {
+          from { opacity: 0.7; box-shadow: 0 0 8px rgba(245,158,11,0.3); }
+          to   { opacity: 1;   box-shadow: 0 0 20px rgba(245,158,11,0.7); }
+        }
+        @keyframes hq-join-glow {
+          0%   { box-shadow: 0 0 0px rgba(16,185,129,0); transform: scale(0.92); opacity: 0.4; }
+          60%  { box-shadow: 0 0 24px rgba(16,185,129,0.7); transform: scale(1.04); opacity: 1; }
+          100% { box-shadow: 0 0 18px rgba(16,185,129,0.4); transform: scale(1); }
+        }
+        @keyframes hq-slide-in {
+          from { transform: translateX(-18px); opacity: 0; }
+          to   { transform: translateX(0);     opacity: 1; }
+        }
+        @keyframes hq-badge-pop {
+          from { transform: scale(0.5); opacity: 0; }
+          to   { transform: scale(1);   opacity: 1; }
+        }
+      `}</style>
       <div className="animate-fade-up" style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
 
         {/* Header */}
@@ -638,7 +731,7 @@ export default function HQ() {
             ) : (
               <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
                 {filteredFree.map(agent => (
-                  <DraggableAgent key={agent.id} agent={agent} />
+                  <DraggableAgent key={agent.id} agent={agent} collecting={collectingWorkers.has(agent.id)} />
                 ))}
               </div>
             )}
@@ -666,6 +759,18 @@ export default function HQ() {
                     background: 'var(--ink-1)', border: '1px solid var(--ink-4)',
                     borderRadius: 6, padding: 14,
                   }}>
+                    {/* Recruiting banner */}
+                    {recruitingProject === project.id && (
+                      <div style={{
+                        display: 'flex', alignItems: 'center', gap: 6,
+                        padding: '5px 10px', marginBottom: 10, borderRadius: 3,
+                        background: 'rgba(245,158,11,0.08)', border: '1px solid rgba(245,158,11,0.3)',
+                        fontFamily: 'var(--font-mono)', fontSize: 9, color: '#f59e0b',
+                        letterSpacing: '0.1em', animation: 'hq-recruit-pulse 0.7s ease-in-out infinite alternate',
+                      }}>
+                        <Zap size={10} /> RECRUITING WORKERS...
+                      </div>
+                    )}
                     {/* Project header */}
                     <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 12 }}>
                       <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
@@ -691,8 +796,8 @@ export default function HQ() {
                       {projectAgents.length > 0 ? (
                         <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
                           {projectAgents.map(agent => (
-                            <div key={agent.id} style={{ position: 'relative' }}>
-                              <DraggableAgent agent={agent} inProject />
+                            <div key={agent.id} style={{ position: 'relative', animation: newlyJoined.has(agent.id) ? 'hq-slide-in 0.35s ease-out' : undefined }}>
+                              <DraggableAgent agent={agent} inProject justJoined={newlyJoined.has(agent.id)} />
                               {/* Release button */}
                               <button
                                 onClick={() => setConfirmUnload(agent)}
