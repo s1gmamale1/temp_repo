@@ -15,6 +15,8 @@ const OLLAMA_MODELS = {
   rnd:    process.env.OLLAMA_MODEL_RND    || DEFAULT_OLLAMA_MODEL,
   worker: process.env.OLLAMA_MODEL_WORKER || DEFAULT_OLLAMA_MODEL,
 };
+const OLLAMA_NUM_PREDICT = parseInt(process.env.OLLAMA_NUM_PREDICT || '220', 10);
+const OLLAMA_TEMPERATURE = parseFloat(process.env.OLLAMA_TEMPERATURE || '0.2');
 
 const OPENROUTER_HOST = 'openrouter.ai';
 
@@ -36,15 +38,27 @@ const TOKEN_PRICING = {
   'moonshot/kimi-k2-turbo':              { prompt: 0.30,  completion: 1.20 },
 };
 
+const OLLAMA_COST_PROMPT_PER_1M = parseFloat(process.env.OLLAMA_COST_PROMPT_PER_1M || '0');
+const OLLAMA_COST_COMPLETION_PER_1M = parseFloat(process.env.OLLAMA_COST_COMPLETION_PER_1M || '0');
+
 // ── HTTP call to Ollama (/api/chat, non-streaming) ────────────────────────────
 function callOllama(messages, model) {
   return new Promise((resolve, reject) => {
+    const timeoutMs = parseInt(process.env.OLLAMA_TIMEOUT_MS || '45000', 10);
     let base;
     try { base = new URL(OLLAMA_BASE_URL); } catch (e) { return reject(new Error(`Invalid OLLAMA_BASE_URL: ${OLLAMA_BASE_URL}`)); }
 
     const isHttps = base.protocol === 'https:';
     const lib     = isHttps ? https : http;
-    const body    = JSON.stringify({ model, messages, stream: false });
+    const body    = JSON.stringify({
+      model,
+      messages,
+      stream: false,
+      options: {
+        num_predict: OLLAMA_NUM_PREDICT,
+        temperature: OLLAMA_TEMPERATURE
+      }
+    });
     const pathPrefix = base.pathname.replace(/\/$/, '');
 
     const opts = {
@@ -75,6 +89,9 @@ function callOllama(messages, model) {
       });
     });
 
+    req.setTimeout(timeoutMs, () => {
+      req.destroy(new Error(`Ollama timeout after ${timeoutMs}ms`));
+    });
     req.on('error', reject);
     req.write(body);
     req.end();
@@ -112,6 +129,7 @@ function isOllamaReachable() {
 // ── HTTP call to OpenRouter ───────────────────────────────────────────────────
 function callOpenRouter(messages, model, apiKey) {
   return new Promise((resolve, reject) => {
+    const timeoutMs = parseInt(process.env.OPENROUTER_TIMEOUT_MS || '45000', 10);
     const body = JSON.stringify({
       model,
       messages,
@@ -149,6 +167,9 @@ function callOpenRouter(messages, model, apiKey) {
       });
     });
 
+    reqHttp.setTimeout(timeoutMs, () => {
+      reqHttp.destroy(new Error(`OpenRouter timeout after ${timeoutMs}ms`));
+    });
     reqHttp.on('error', reject);
     reqHttp.write(body);
     reqHttp.end();
@@ -247,9 +268,29 @@ function selectModel(agent) {
   return DEFAULT_MODELS[agent.agent_type || 'worker'] || DEFAULT_MODELS.worker;
 }
 
+function normalizeProvider(value) {
+  const v = String(value || '').toLowerCase().trim();
+  if (!v) return null;
+  if (v === 'claude' || v === 'anthropic' || v === 'openrouter') return 'openrouter';
+  if (v === 'ollama') return 'ollama';
+  if (v === 'auto' || v === 'simulation') return v;
+  return null;
+}
+
+function normalizeModel(model, provider) {
+  if (!model) return null;
+  const m = String(model).trim();
+  if (provider === 'openrouter') {
+    if (m === 'claude-sonnet-4-6') return 'anthropic/claude-sonnet-4-6';
+    if (m === 'claude-haiku-4-5') return 'anthropic/claude-haiku-4-5-20251001';
+    if (m === 'claude-opus-4-6') return 'anthropic/claude-opus-4-6';
+  }
+  return m;
+}
+
 // ── Calculate cost from token usage ──────────────────────────────────────────
-function estimateCost(model, promptTokens, completionTokens) {
-  const pricing = TOKEN_PRICING[model] || { prompt: 1.0, completion: 3.0 };
+function estimateCost(model, promptTokens, completionTokens, pricingOverride = null) {
+  const pricing = pricingOverride || TOKEN_PRICING[model] || { prompt: 1.0, completion: 3.0 };
   const promptCost      = (promptTokens     / 1_000_000) * pricing.prompt;
   const completionCost  = (completionTokens / 1_000_000) * pricing.completion;
   return {
@@ -263,7 +304,13 @@ function estimateCost(model, promptTokens, completionTokens) {
 // ── Main executor ─────────────────────────────────────────────────────────────
 async function executeTask(task, agent, project) {
   const apiKey     = process.env.OPENROUTER_API_KEY;
-  const aiProvider = (process.env.AI_PROVIDER || 'auto').toLowerCase();
+  const envProvider = (process.env.AI_PROVIDER || 'auto').toLowerCase();
+
+  let payload = {};
+  try { payload = JSON.parse(task.payload || '{}'); } catch { payload = {}; }
+
+  const requestedProvider = normalizeProvider(payload.provider);
+  const requestedModelRaw = payload.model || null;
 
   // Build messages once — shared by all providers
   const systemPrompt = buildSystemPrompt(agent, project);
@@ -283,7 +330,7 @@ async function executeTask(task, agent, project) {
   ];
 
   // Resolve effective provider
-  let provider = aiProvider;
+  let provider = requestedProvider || envProvider;
   if (provider === 'auto') {
     if (await isOllamaReachable()) {
       provider = 'ollama';
@@ -298,13 +345,14 @@ async function executeTask(task, agent, project) {
 
   // ── Simulation ───────────────────────────────────────────────────────────
   if (provider === 'simulation') {
-    const reason = aiProvider === 'openrouter'
+    const reason = (requestedProvider || envProvider) === 'openrouter'
       ? 'no OPENROUTER_API_KEY'
       : 'Ollama unreachable and no OPENROUTER_API_KEY';
     return {
       success:  true,
       skipped:  true,
       provider: 'simulation',
+      cost_mode: 'none',
       result:   `[SIMULATED — ${reason}]\n\n**${agent.name}** completed task: _${task.title}_\n\nTo enable real AI execution, set AI_PROVIDER=ollama (with Ollama running) or set OPENROUTER_API_KEY in api-server/.env`,
       model:    null,
       tokens:   null,
@@ -315,16 +363,24 @@ async function executeTask(task, agent, project) {
   // ── Ollama ────────────────────────────────────────────────────────────────
   if (provider === 'ollama') {
     const agentType   = agent.agent_type || 'worker';
-    const ollamaModel = OLLAMA_MODELS[agentType] || DEFAULT_OLLAMA_MODEL;
+    const ollamaModel = normalizeModel(requestedModelRaw, 'ollama') || OLLAMA_MODELS[agentType] || DEFAULT_OLLAMA_MODEL;
     const response    = await callOllama(messages, ollamaModel);
     const content     = response.message?.content || '(no output)';
     const promptTokens     = response.prompt_eval_count || 0;
     const completionTokens = response.eval_count        || 0;
 
+    const cost = estimateCost(
+      'ollama/local',
+      promptTokens,
+      completionTokens,
+      { prompt: OLLAMA_COST_PROMPT_PER_1M, completion: OLLAMA_COST_COMPLETION_PER_1M }
+    );
+
     return {
       success:  true,
       skipped:  false,
       provider: 'ollama',
+      cost_mode: 'estimated',
       result:   content,
       model:    ollamaModel,
       tokens: {
@@ -332,12 +388,12 @@ async function executeTask(task, agent, project) {
         completion: completionTokens,
         total:      promptTokens + completionTokens,
       },
-      cost: { prompt_cost: 0, completion_cost: 0, total_cost: 0, pricing: { prompt: 0, completion: 0 } },
+      cost,
     };
   }
 
   // ── OpenRouter ────────────────────────────────────────────────────────────
-  const model    = selectModel(agent);
+  const model    = normalizeModel(requestedModelRaw, 'openrouter') || selectModel(agent);
   const response = await callOpenRouter(messages, model, apiKey);
 
   const content          = response.choices?.[0]?.message?.content || '(no output)';
@@ -350,6 +406,7 @@ async function executeTask(task, agent, project) {
     success:  true,
     skipped:  false,
     provider: 'openrouter',
+    cost_mode: 'actual',
     result:   content,
     model,
     tokens: {

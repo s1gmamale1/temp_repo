@@ -8,15 +8,17 @@ const { getDb } = require('./database');
 
 // Budget config (only hardcoded values — intentional)
 const PROVIDER_BUDGETS = {
-  openai: { budget: 120 },
-  claude: { budget: 100 }
+  openai: { budget: Number(process.env.BUDGET_OPENAI || 120) },
+  claude: { budget: Number(process.env.BUDGET_CLAUDE || 100) },
+  ollama: { budget: Number(process.env.BUDGET_OLLAMA || 0) }
 };
 
 function normalizeProvider(provider) {
   if (!provider) return 'unknown';
   const p = provider.toLowerCase().trim();
   if (p.includes('openai') || p.includes('gpt') || p.includes('o1') || p.includes('o3')) return 'openai';
-  if (p.includes('claude') || p.includes('anthropic')) return 'claude';
+  if (p.includes('claude') || p.includes('anthropic') || p.includes('openrouter')) return 'claude';
+  if (p.includes('ollama') || p.includes('local')) return 'ollama';
   return p;
 }
 
@@ -101,24 +103,36 @@ async function getDashboardSummary(month, days) {
   };
 }
 
+function providerAliases(key) {
+  if (key === 'claude') return ['claude', 'anthropic', 'openrouter'];
+  if (key === 'openai') return ['openai'];
+  if (key === 'ollama') return ['ollama', 'local'];
+  return [key];
+}
+
 async function getProviderDetails(providerName, month, days) {
   const key = normalizeProvider(providerName);
   if (!PROVIDER_BUDGETS[key]) return { error: 'Unknown provider', validProviders: Object.keys(PROVIDER_BUDGETS) };
 
   const db = getDb();
   const { start, end } = resolveBounds(month, days);
+  const aliases = providerAliases(key);
 
   const stats = db.prepare(`
     SELECT SUM(cost_usd) AS total_cost, SUM(total_tokens) AS total_tokens,
       SUM(prompt_tokens) AS input_tokens, SUM(completion_tokens) AS output_tokens, COUNT(*) AS request_count
-    FROM cost_records WHERE provider = ? AND recorded_at >= ? AND recorded_at < ?
-  `).get(key, start, end) || {};
+    FROM cost_records
+    WHERE recorded_at >= ? AND recorded_at < ?
+      AND (${aliases.map(() => 'lower(provider) LIKE ?').join(' OR ')})
+  `).get(start, end, ...aliases.map(a => `%${a}%`)) || {};
 
   const modelStats = db.prepare(`
     SELECT model AS name, SUM(cost_usd) AS cost, SUM(total_tokens) AS tokens, COUNT(*) AS requests
-    FROM cost_records WHERE provider = ? AND recorded_at >= ? AND recorded_at < ?
+    FROM cost_records
+    WHERE recorded_at >= ? AND recorded_at < ?
+      AND (${aliases.map(() => 'lower(provider) LIKE ?').join(' OR ')})
     GROUP BY model ORDER BY cost DESC
-  `).all(key, start, end);
+  `).all(start, end, ...aliases.map(a => `%${a}%`));
 
   const budget    = PROVIDER_BUDGETS[key].budget;
   const totalCost = parseFloat((stats.total_cost || 0).toFixed(4));
@@ -143,13 +157,16 @@ async function getDailyUsage(providerName, month, days) {
   const key = normalizeProvider(providerName);
   const db  = getDb();
   const { start, end } = resolveBounds(month, days);
+  const aliases = providerAliases(key);
 
   const daily = db.prepare(`
     SELECT strftime('%Y-%m-%d', recorded_at) AS date,
       SUM(cost_usd) AS cost, SUM(total_tokens) AS tokens, COUNT(*) AS requests
-    FROM cost_records WHERE provider = ? AND recorded_at >= ? AND recorded_at < ?
+    FROM cost_records
+    WHERE recorded_at >= ? AND recorded_at < ?
+      AND (${aliases.map(() => 'lower(provider) LIKE ?').join(' OR ')})
     GROUP BY strftime('%Y-%m-%d', recorded_at) ORDER BY date ASC
-  `).all(key, start, end);
+  `).all(start, end, ...aliases.map(a => `%${a}%`));
 
   return {
     provider: key,

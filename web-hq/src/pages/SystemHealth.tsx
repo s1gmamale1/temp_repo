@@ -46,6 +46,13 @@ function isOfflineAlert(lastSeen: string | null, status: string): boolean {
 export default function SystemHealth() {
   const [agents, setAgents] = useState<any[]>([]);
   const [machines, setMachines] = useState<any[]>([]);
+  const [serviceStatus, setServiceStatus] = useState({
+    backendUp: false,
+    backendLatencyMs: 0,
+    frontendUp: typeof navigator !== 'undefined' ? navigator.onLine : true,
+    backendVersion: '—',
+  });
+  const [recentIssues, setRecentIssues] = useState<any[]>([]);
   const [opsSummary, setOpsSummary] = useState({
     projects: 0,
     activeTasks: 0,
@@ -61,12 +68,16 @@ export default function SystemHealth() {
   const fetchAll = useCallback(async () => {
     try {
       setLoading(true); setError(null);
-      const [ag, mc, pr, tk] = await Promise.all([
+      const startedAt = performance.now();
+      const [healthRes, ag, mc, pr, tk, activity] = await Promise.all([
+        apiFetch('/health').catch(() => null),
         apiFetch('/api/agents'),
         apiFetch('/api/machines').catch(() => ({ machines: [] })),
         apiFetch('/api/projects').catch(() => ({ projects: [] })),
         apiFetch('/api/tokens/live').catch(() => ({ totals: {} })),
+        apiFetch('/api/activity?limit=40').catch(() => ({ activities: [] })),
       ]);
+      const backendLatencyMs = Math.round(performance.now() - startedAt);
       const projects = Array.isArray(pr) ? pr : (pr?.projects || []);
       const activeTasks = projects.reduce((sum: number, p: any) => sum + (p?.stats?.activeTasks || 0), 0);
       const completedTasks = projects.reduce((sum: number, p: any) => sum + (p?.stats?.completedTasks || 0), 0);
@@ -81,6 +92,19 @@ export default function SystemHealth() {
         totalCost: tk?.totals?.cost || 0,
         requestCount: tk?.totals?.requests || 0,
       });
+
+      setServiceStatus({
+        backendUp: Boolean(healthRes?.status === 'ok'),
+        backendLatencyMs,
+        frontendUp: typeof navigator !== 'undefined' ? navigator.onLine : true,
+        backendVersion: healthRes?.version || '—',
+      });
+
+      const issues = (activity?.activities || [])
+        .filter((a: any) => ['failed', 'error', 'rejected', 'cancelled'].some(k => String(a.action || '').toLowerCase().includes(k)))
+        .slice(0, 6);
+      setRecentIssues(issues);
+
       setLastRefresh(new Date());
     } catch (e: any) { setError(e.message); }
     finally { setLoading(false); }
@@ -176,6 +200,46 @@ export default function SystemHealth() {
             <div style={{ fontFamily: 'var(--font-mono)', fontSize: 18, fontWeight: 700, color: s.color }}>{s.val}</div>
           </div>
         ))}
+      </div>
+
+      {/* Service heartbeat */}
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+        <div className="ops-panel p-4">
+          <div className="ops-section-header mb-3">Service Heartbeat</div>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+              <span style={{ fontFamily: 'var(--font-mono)', fontSize: 10, color: 'var(--text-lo)' }}>Backend (3001)</span>
+              <span style={{ fontFamily: 'var(--font-mono)', fontSize: 10, color: serviceStatus.backendUp ? '#10b981' : '#ef4444' }}>
+                {serviceStatus.backendUp ? 'UP' : 'DOWN'} · {serviceStatus.backendLatencyMs}ms
+              </span>
+            </div>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+              <span style={{ fontFamily: 'var(--font-mono)', fontSize: 10, color: 'var(--text-lo)' }}>Frontend (5173)</span>
+              <span style={{ fontFamily: 'var(--font-mono)', fontSize: 10, color: serviceStatus.frontendUp ? '#10b981' : '#ef4444' }}>
+                {serviceStatus.frontendUp ? 'UP' : 'OFFLINE'}
+              </span>
+            </div>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+              <span style={{ fontFamily: 'var(--font-mono)', fontSize: 10, color: 'var(--text-lo)' }}>Backend Version</span>
+              <span style={{ fontFamily: 'var(--font-mono)', fontSize: 10, color: 'var(--text-hi)' }}>{serviceStatus.backendVersion}</span>
+            </div>
+          </div>
+        </div>
+        <div className="ops-panel p-4">
+          <div className="ops-section-header mb-3">Recent Issues</div>
+          {recentIssues.length === 0 ? (
+            <div style={{ fontFamily: 'var(--font-mono)', fontSize: 10, color: '#10b981' }}>No recent failure events 🎉</div>
+          ) : (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+              {recentIssues.map((i: any) => (
+                <div key={i.id} style={{ border: '1px solid rgba(239,68,68,0.2)', background: 'rgba(239,68,68,0.06)', borderRadius: 4, padding: '6px 8px' }}>
+                  <div style={{ fontFamily: 'var(--font-mono)', fontSize: 9, color: '#ef4444', textTransform: 'uppercase' }}>{i.event_type} · {i.action}</div>
+                  <div style={{ fontFamily: 'var(--font-mono)', fontSize: 10, color: 'var(--text-hi)', marginTop: 2 }}>{i.entity_title || i.project_name || i.entity_id}</div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
       </div>
 
       {loading && !agents.length ? (
