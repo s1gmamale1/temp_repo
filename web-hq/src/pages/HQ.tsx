@@ -20,6 +20,7 @@ interface Agent {
   name: string;
   handle: string;
   status: string;
+  is_active?: boolean;
   agent_type: 'pm' | 'worker' | 'rnd';
   current_mode: string | null;
   current_model: string | null;
@@ -96,7 +97,17 @@ function getTypeColor(type: string) {
   return 'var(--text-lo)';
 }
 
+function normalizeAgentStatus(agent: Agent): 'registered' | 'online' | 'working' | 'offline' {
+  const s = String(agent.status || '').toLowerCase();
+  const active = agent.is_active !== false;
+  if (!active && ['online', 'idle', 'busy', 'working'].includes(s)) return 'registered';
+  if (s === 'working' || s === 'running' || s === 'busy') return 'working';
+  if (s === 'online' || s === 'idle') return 'online';
+  return 'offline';
+}
+
 function getStatusDot(status: string) {
+  if (status === 'registered') return 'ops-dot ops-dot-amber';
   if (status === 'online')  return 'ops-dot ops-dot-green ops-dot-pulse';
   if (status === 'working') return 'ops-dot ops-dot-amber ops-dot-pulse';
   if (status === 'offline') return 'ops-dot ops-dot-gray';
@@ -191,7 +202,7 @@ function AgentCard({ agent, dragging = false, inProject = false, collecting = fa
             </div>
           </div>
         </div>
-        <span className={getStatusDot(agent.status)} />
+        <span className={getStatusDot(normalizeAgentStatus(agent))} />
       </div>
 
       {/* Mode badge */}
@@ -210,7 +221,7 @@ function AgentCard({ agent, dragging = false, inProject = false, collecting = fa
         </div>
       ) : (
         <div style={{ fontFamily: 'var(--font-mono)', fontSize: 8, color: 'var(--text-dim)', letterSpacing: '0.1em', marginBottom: 4 }}>
-          FREE ⠿ drag to assign
+          {normalizeAgentStatus(agent) === 'registered' ? 'REGISTERED ⠿ ready to assign' : 'FREE ⠿ drag to assign'}
         </div>
       )}
 
@@ -753,7 +764,7 @@ export default function HQ() {
             <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
               {projects.map(project => {
                 const projectAgents = getProjectAgents(project.id);
-                const runningCount = projectAgents.filter(a => a.status === 'working').length;
+                const runningCount = projectAgents.filter(a => normalizeAgentStatus(a) === 'working').length;
                 return (
                   <div key={project.id} style={{
                     background: 'var(--ink-1)', border: '1px solid var(--ink-4)',

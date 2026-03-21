@@ -108,7 +108,7 @@ export default function Tasks() {
           <span style={{ ...mono, fontSize: 11, color: 'var(--text-lo)' }}>LOADING TASKS...</span>
         </div>
       ) : view === 'kanban' ? (
-        <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
+        <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-3">
           {STATUS_COLS.map(col => {
             const colTasks = tasks.filter(t => (t.status || 'pending') === col);
             return (

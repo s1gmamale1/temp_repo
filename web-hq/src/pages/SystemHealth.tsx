@@ -268,6 +268,7 @@ export default function SystemHealth() {
                 {agents.map(agent => {
                   const cfg = STATUS_CFG[agent.status] || STATUS_CFG.offline;
                   const alert = isOfflineAlert(agent.last_seen || agent.last_heartbeat, agent.status);
+                  const isRegisteredOnly = agent.is_active === false && ['online', 'idle', 'busy', 'working'].includes(String(agent.status || '').toLowerCase());
                   return (
                     <div key={agent.id} style={{
                       display: 'flex', alignItems: 'center', gap: 10,
@@ -286,8 +287,8 @@ export default function SystemHealth() {
                       </div>
                       <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexShrink: 0 }}>
                         {alert && <AlertTriangle size={10} style={{ color: '#ef4444' }} />}
-                        <span style={{ fontFamily: 'var(--font-mono)', fontSize: 8, letterSpacing: '0.1em', color: cfg.color, textTransform: 'uppercase' }}>
-                          {cfg.label}
+                        <span style={{ fontFamily: 'var(--font-mono)', fontSize: 8, letterSpacing: '0.1em', color: isRegisteredOnly ? 'var(--amber)' : cfg.color, textTransform: 'uppercase' }}>
+                          {isRegisteredOnly ? 'REGISTERED' : cfg.label}
                         </span>
                         <span style={{ fontFamily: 'var(--font-mono)', fontSize: 9, color: 'var(--text-lo)' }}>
                           {timeAgo(agent.last_seen || agent.last_heartbeat)}

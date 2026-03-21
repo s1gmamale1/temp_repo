@@ -498,6 +498,99 @@ export default function ProjectDetail() {
       projectName={project.name}
     />
   )}
+
+  {/* Costs Tab */}
+  {activeTab === 'costs' && project && (
+    <div className="space-y-4">
+      {/* Summary cards */}
+      <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
+        <div className="ops-stat">
+          <div className="ops-label mb-2">Today</div>
+          <div className="ops-value" style={{ color: '#f59e0b' }}>${(project.stats?.todayCost || 0).toFixed(4)}</div>
+        </div>
+        <div className="ops-stat">
+          <div className="ops-label mb-2">This Month</div>
+          <div className="ops-value" style={{ color: 'var(--text-hi)' }}>${(project.stats?.monthCost || 0).toFixed(4)}</div>
+        </div>
+        <div className="ops-stat">
+          <div className="ops-label mb-2">Tasks Run</div>
+          <div className="ops-value">{projectTasks.filter(t => t.status === 'completed').length}</div>
+        </div>
+        <div className="ops-stat">
+          <div className="ops-label mb-2">Budget Used</div>
+          <div className="ops-value" style={{ color: project.stats?.monthBudget && project.stats.monthBudget > 0 ? (((project.stats.monthCost || 0) / project.stats.monthBudget) > 0.8 ? '#ef4444' : '#f59e0b') : 'var(--text-lo)' }}>
+            {project.stats?.monthBudget && project.stats.monthBudget > 0
+              ? `${Math.min(((project.stats.monthCost || 0) / project.stats.monthBudget) * 100, 100).toFixed(0)}%`
+              : '—'}
+          </div>
+        </div>
+      </div>
+
+      {/* Budget progress */}
+      {project.stats?.monthBudget && project.stats.monthBudget > 0 && (
+        <div className="ops-panel p-4">
+          <div className="flex items-center justify-between mb-3">
+            <div className="ops-section-header" style={{ marginBottom: 0 }}>Budget Utilization</div>
+            <span style={{ fontFamily: 'var(--font-mono)', fontSize: 10, color: 'var(--text-lo)' }}>
+              ${(project.stats?.monthCost || 0).toFixed(2)} / ${project.stats.monthBudget}
+            </span>
+          </div>
+          <div className="ops-bar-track" style={{ height: 6 }}>
+            <div className="ops-bar-fill" style={{
+              width: Math.min(((project.stats?.monthCost || 0) / project.stats.monthBudget) * 100, 100) + '%',
+              background: ((project.stats?.monthCost || 0) / project.stats.monthBudget) > 0.8
+                ? 'linear-gradient(90deg,#b91c1c,#ef4444)'
+                : 'linear-gradient(90deg,var(--amber-dim),var(--amber))',
+            }} />
+          </div>
+        </div>
+      )}
+
+      {/* Per-task cost breakdown */}
+      <div className="ops-panel p-4">
+        <div className="ops-section-header mb-3">Task Cost Breakdown</div>
+        {projectTasks.length === 0 ? (
+          <p style={{ fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--text-lo)', textAlign: 'center', padding: '16px 0' }}>No tasks yet</p>
+        ) : (
+          <table className="ops-table w-full">
+            <thead>
+              <tr>
+                <th>Task</th>
+                <th>Status</th>
+                <th style={{ textAlign: 'right' }}>Est. Cost</th>
+                <th style={{ textAlign: 'right' }}>Actual</th>
+              </tr>
+            </thead>
+            <tbody>
+              {projectTasks.map(task => (
+                <tr key={task.id}>
+                  <td style={{ color: 'var(--text-hi)', maxWidth: 200 }}>
+                    <span style={{ display: 'block', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={task.title}>
+                      {task.title}
+                    </span>
+                  </td>
+                  <td>
+                    <span style={{
+                      fontFamily: 'var(--font-mono)', fontSize: 9, textTransform: 'uppercase', letterSpacing: '0.06em',
+                      color: task.status === 'completed' ? '#10b981' : task.status === 'running' ? '#f59e0b' : task.status === 'failed' ? '#ef4444' : 'var(--text-lo)'
+                    }}>
+                      {task.status}
+                    </span>
+                  </td>
+                  <td style={{ textAlign: 'right', color: 'var(--text-lo)' }}>
+                    {task.estimated_cost != null ? `$${Number(task.estimated_cost).toFixed(4)}` : '—'}
+                  </td>
+                  <td style={{ textAlign: 'right', color: task.actual_cost != null ? 'var(--amber)' : 'var(--text-lo)' }}>
+                    {task.actual_cost != null ? `$${Number(task.actual_cost).toFixed(4)}` : '—'}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </div>
+    </div>
+  )}
 </div>
   );
 }
