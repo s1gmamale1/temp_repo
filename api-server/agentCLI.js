@@ -240,6 +240,7 @@ function callOpenRouter(messages) {
             messages,
             max_tokens: 400,
             temperature: 0.8,
+            provider: { allow_fallbacks: false, order: ['Anthropic'] },
         });
         const opts = {
             hostname: 'openrouter.ai',

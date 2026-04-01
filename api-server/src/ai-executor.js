@@ -288,11 +288,17 @@ function callOpenClaw(taskPrompt) {
 function callOpenRouter(messages, model, apiKey) {
   return new Promise((resolve, reject) => {
     const timeoutMs = parseInt(process.env.OPENROUTER_TIMEOUT_MS || '45000', 10);
+    // Restrict to Anthropic only — prevents OpenRouter from auto-routing to
+    // OAuth-gated models (e.g. openai-codex/gpt-5.4) when primary model fails
+    const providerRestriction = model && model.startsWith('anthropic/')
+      ? { provider: { allow_fallbacks: false, order: ['Anthropic'] } }
+      : {};
     const body = JSON.stringify({
       model,
       messages,
       max_tokens: 1500,
       temperature: 0.7,
+      ...providerRestriction,
     });
 
     const opts = {
