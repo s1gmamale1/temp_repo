@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
-import { Loader2, RefreshCw, Bot, AlertTriangle, CheckCircle, Info, Zap, Filter, Radio } from 'lucide-react';
+import { Loader2, RefreshCw, Bot, AlertTriangle, CheckCircle, Info, Zap, Filter, Radio, Activity } from 'lucide-react';
 import { useChatStore } from '../store/chatStore';
 import { wsClient } from '../services/api';
 
@@ -38,9 +38,19 @@ const getTypeCfg = (t: string) => TYPE_CFG[t] || defaultType;
 const AGENT_COLORS = ['#60a5fa','var(--amber)','#10b981','var(--cyan)','#a78bfa','#f472b6','#fb923c'];
 const agentColor = (id: string) => AGENT_COLORS[Math.abs(id?.split('').reduce((a, c) => a + c.charCodeAt(0), 0) || 0) % AGENT_COLORS.length];
 
+// Per-agent live phase state — updated by WS without full re-fetch
+type AgentPhaseState = {
+  phase: string | null;
+  task_id: string | null;
+  task_title: string | null;
+  status_text: string | null;
+  phase_started_at: string | null;
+};
+
 export default function LiveReport() {
   const [notifications, setNotifications] = useState<any[]>([]);
   const [agents, setAgents] = useState<any[]>([]);
+  const [agentPhases, setAgentPhases] = useState<Record<string, AgentPhaseState>>({});
   const [unreadByAgent, setUnreadByAgent] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -69,7 +79,24 @@ export default function LiveReport() {
   const fetchAgents = useCallback(async () => {
     try {
       const d = await apiFetch('/api/agents');
-      setAgents(Array.isArray(d) ? d : (d?.agents || []));
+      const list: any[] = Array.isArray(d) ? d : (d?.agents || []);
+      setAgents(list);
+      // Seed initial phase state from agent data
+      setAgentPhases(prev => {
+        const next = { ...prev };
+        list.forEach((a: any) => {
+          if (!next[a.id]) {
+            next[a.id] = {
+              phase: a.current_phase || null,
+              task_id: a.current_task_id || null,
+              task_title: a.current_task_title || null,
+              status_text: a.status_text || null,
+              phase_started_at: a.phase_started_at || null,
+            };
+          }
+        });
+        return next;
+      });
     } catch {}
   }, []);
 
@@ -81,7 +108,7 @@ export default function LiveReport() {
     return () => clearInterval(id);
   }, [fetchFeed]);
 
-  // Live WS updates
+  // Live WS updates — notification feed
   useEffect(() => {
     const handler = (data: any) => {
       setLiveCount(c => c + 1);
@@ -98,6 +125,57 @@ export default function LiveReport() {
       wsClient.off('task:completed', handler);
     };
   }, [fetchFeed]);
+
+  // Live WS updates — agent phase/status grid (no full re-fetch needed)
+  useEffect(() => {
+    const phaseHandler = (data: any) => {
+      if (!data?.agent_id) return;
+      setLiveCount(c => c + 1);
+      setAgentPhases(prev => ({
+        ...prev,
+        [data.agent_id]: {
+          phase: data.phase ?? prev[data.agent_id]?.phase ?? null,
+          task_id: data.task_id ?? prev[data.agent_id]?.task_id ?? null,
+          task_title: data.task_title ?? prev[data.agent_id]?.task_title ?? null,
+          status_text: prev[data.agent_id]?.status_text ?? null,
+          phase_started_at: data.started_at ?? prev[data.agent_id]?.phase_started_at ?? null,
+        },
+      }));
+    };
+    const statusTextHandler = (data: any) => {
+      if (!data?.agent_id) return;
+      setAgentPhases(prev => ({
+        ...prev,
+        [data.agent_id]: {
+          ...(prev[data.agent_id] || { phase: null, task_id: null, task_title: null, phase_started_at: null }),
+          status_text: data.status_text ?? null,
+        },
+      }));
+    };
+    const taskCompletedHandler = (data: any) => {
+      if (!data?.agent_id) return;
+      setAgentPhases(prev => ({
+        ...prev,
+        [data.agent_id]: {
+          ...(prev[data.agent_id] || { phase: null, task_id: null, task_title: null, phase_started_at: null, status_text: null }),
+          phase: null,
+          task_id: null,
+          task_title: null,
+          status_text: null,
+        },
+      }));
+    };
+    wsClient.on('agent:phase', phaseHandler);
+    wsClient.on('agent:status_text', statusTextHandler);
+    wsClient.on('task:completed', taskCompletedHandler);
+    wsClient.on('task:failed', taskCompletedHandler);
+    return () => {
+      wsClient.off('agent:phase', phaseHandler);
+      wsClient.off('agent:status_text', statusTextHandler);
+      wsClient.off('task:completed', taskCompletedHandler);
+      wsClient.off('task:failed', taskCompletedHandler);
+    };
+  }, []);
 
   const totalUnread = unreadByAgent.reduce((s, a) => s + (a.unread || 0), 0);
 
@@ -135,6 +213,75 @@ export default function LiveReport() {
           </button>
         </div>
       </div>
+
+      {/* Agent Status Grid — live per-agent current work */}
+      {agents.length > 0 && (
+        <div>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 8 }}>
+            <Activity size={10} style={{ color: 'var(--text-lo)' }} />
+            <span style={{ fontFamily: 'var(--font-mono)', fontSize: 9, letterSpacing: '0.1em', color: 'var(--text-lo)' }}>
+              AGENT STATUS
+            </span>
+          </div>
+          <div className="grid grid-cols-2 md:grid-cols-3 gap-2">
+            {agents.map((a: any) => {
+              const ps = agentPhases[a.id];
+              const color = agentColor(a.id);
+              const isActive = !!(ps?.phase || ps?.task_title);
+              const statusOnline = a.status === 'online';
+              return (
+                <div key={a.id} className="ops-panel" style={{
+                  padding: '10px 12px',
+                  border: isActive ? `1px solid ${color}30` : '1px solid var(--ink-3)',
+                  background: isActive ? `${color}05` : undefined,
+                  cursor: 'pointer',
+                }} onClick={() => setFilterAgent(filterAgent === a.id ? '' : a.id)}>
+                  {/* Agent name row */}
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 5 }}>
+                    <span style={{
+                      width: 7, height: 7, borderRadius: '50%', flexShrink: 0,
+                      background: statusOnline ? color : 'var(--text-lo)',
+                      boxShadow: isActive ? `0 0 5px ${color}80` : undefined,
+                    }} />
+                    <span style={{ fontFamily: 'var(--font-mono)', fontSize: 10, fontWeight: 600, color: 'var(--text-hi)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                      {a.name}
+                    </span>
+                    <span style={{ marginLeft: 'auto', fontFamily: 'var(--font-mono)', fontSize: 8, letterSpacing: '0.08em', color: statusOnline ? color : 'var(--text-lo)', flexShrink: 0 }}>
+                      {statusOnline ? 'ONLINE' : 'OFFLINE'}
+                    </span>
+                  </div>
+
+                  {/* Current task */}
+                  {ps?.task_title ? (
+                    <div style={{ fontFamily: 'var(--font-mono)', fontSize: 9, color: 'var(--text-mid)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', marginBottom: 3 }}
+                      title={ps.task_title}>
+                      {ps.task_title}
+                    </div>
+                  ) : (
+                    <div style={{ fontFamily: 'var(--font-mono)', fontSize: 9, color: 'var(--text-lo)' }}>idle</div>
+                  )}
+
+                  {/* Phase badge */}
+                  {ps?.phase && (
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+                      <span className="ops-dot ops-dot-green ops-dot-pulse" style={{ background: color }} />
+                      <span style={{ fontFamily: 'var(--font-mono)', fontSize: 8, letterSpacing: '0.08em', color }}>
+                        {ps.phase.toUpperCase()}
+                        {ps.phase_started_at && ` · ${timeAgo(ps.phase_started_at)}`}
+                      </span>
+                    </div>
+                  )}
+                  {ps?.status_text && !ps?.phase && (
+                    <div style={{ fontFamily: 'var(--font-mono)', fontSize: 8, color: 'var(--text-lo)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                      {ps.status_text}
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
 
       {/* Unread summary */}
       {unreadByAgent.length > 0 && (

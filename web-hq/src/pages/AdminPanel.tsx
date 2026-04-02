@@ -1,6 +1,7 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { adminApi, orchestrationApi, wsClient } from '../services/api';
-import { Shield, CheckCircle, XCircle, Loader2, RefreshCw, Search, Bot, Users, UserCheck, Trash2, Cpu, Radio, Zap } from 'lucide-react';
+import { toast } from '../components/Toast';
+import { Shield, CheckCircle, XCircle, Loader2, RefreshCw, Search, Bot, Users, UserCheck, Trash2, Cpu, Radio, Zap, ScrollText, AlertTriangle, Info, AlertOctagon } from 'lucide-react';
 
 const TYPE_META: Record<string, { icon: React.ReactNode; color: string; label: string }> = {
   pm:     { icon: <Cpu size={11} />,   color: '#f59e0b', label: 'PM' },
@@ -9,8 +10,101 @@ const TYPE_META: Record<string, { icon: React.ReactNode; color: string; label: s
 };
 const getTypeMeta = (t?: string) => TYPE_META[t ?? ''] ?? TYPE_META['worker'];
 
+// ── Log Viewer ──────────────────────────────────────────────────────────────
+
+type LogEntry = { time: string; level: string; msg: string; [key: string]: unknown };
+
+const LEVEL_STYLE: Record<string, { color: string; icon: React.ReactNode; label: string }> = {
+  info:  { color: '#60a5fa', icon: <Info size={10} />,          label: 'INFO'  },
+  warn:  { color: '#f59e0b', icon: <AlertTriangle size={10} />, label: 'WARN'  },
+  error: { color: '#ef4444', icon: <AlertOctagon size={10} />,  label: 'ERROR' },
+  debug: { color: '#94a3b8', icon: <Info size={10} />,          label: 'DEBUG' },
+  fatal: { color: '#f87171', icon: <AlertOctagon size={10} />,  label: 'FATAL' },
+};
+const getLevelStyle = (l: string) => LEVEL_STYLE[l] ?? LEVEL_STYLE['info'];
+
+function LogViewer() {
+  const [logs, setLogs] = useState<LogEntry[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [levelFilter, setLevelFilter] = useState('');
+  const mono: React.CSSProperties = { fontFamily: 'var(--font-mono)' };
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    try {
+      const res = await adminApi.getLogs({ limit: 200, ...(levelFilter ? { level: levelFilter } : {}) });
+      setLogs(res.logs || []);
+    } catch (e: any) {
+      toast.error('Failed to load logs', e.message);
+    } finally {
+      setLoading(false);
+    }
+  }, [levelFilter]);
+
+  useEffect(() => { load(); }, [load]);
+
+  return (
+    <div className="space-y-3">
+      <div className="flex items-center gap-2">
+        <select value={levelFilter} onChange={e => setLevelFilter(e.target.value)}
+          className="ops-input" style={{ width: 120, ...mono, fontSize: 11 }}>
+          <option value="">All levels</option>
+          <option value="info">INFO</option>
+          <option value="warn">WARN</option>
+          <option value="error">ERROR</option>
+          <option value="debug">DEBUG</option>
+        </select>
+        <button onClick={load} disabled={loading} className="ops-btn flex items-center gap-1">
+          {loading ? <Loader2 size={11} className="animate-spin" /> : <RefreshCw size={11} />} Refresh
+        </button>
+        <span style={{ ...mono, fontSize: 10, color: 'var(--text-lo)', marginLeft: 'auto' }}>{logs.length} entries</span>
+      </div>
+      <div style={{ background: 'var(--ink-1)', border: '1px solid var(--ink-4)', borderRadius: 2, maxHeight: 520, overflowY: 'auto' }}>
+        {logs.length === 0 ? (
+          <p style={{ ...mono, fontSize: 11, color: 'var(--text-lo)', padding: '32px 0', textAlign: 'center' }}>
+            {loading ? 'Loading…' : '— no log entries captured yet —'}
+          </p>
+        ) : (
+          <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+            <thead style={{ position: 'sticky', top: 0, background: 'var(--ink-2)', zIndex: 1 }}>
+              <tr>
+                {['Time', 'Level', 'Message', 'Meta'].map(h => (
+                  <th key={h} style={{ ...mono, fontSize: 9, letterSpacing: '0.1em', color: 'var(--text-lo)', textTransform: 'uppercase', padding: '6px 10px', textAlign: 'left', borderBottom: '1px solid var(--ink-4)' }}>{h}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {logs.map((entry, i) => {
+                const ls = getLevelStyle(entry.level);
+                const { time, level, msg, ...meta } = entry;
+                const metaStr = Object.keys(meta).length ? JSON.stringify(meta) : '';
+                return (
+                  <tr key={i} style={{ borderBottom: '1px solid var(--ink-3)' }}>
+                    <td style={{ ...mono, fontSize: 10, color: 'var(--text-lo)', padding: '5px 10px', whiteSpace: 'nowrap' }}>
+                      {new Date(time).toLocaleTimeString()}
+                    </td>
+                    <td style={{ padding: '5px 10px' }}>
+                      <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4, ...mono, fontSize: 9, letterSpacing: '0.08em', color: ls.color, background: ls.color + '18', border: `1px solid ${ls.color}33`, borderRadius: 2, padding: '2px 6px' }}>
+                        {ls.icon} {ls.label}
+                      </span>
+                    </td>
+                    <td style={{ ...mono, fontSize: 11, color: 'var(--text-hi)', padding: '5px 10px', maxWidth: 400, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={msg}>{msg}</td>
+                    <td style={{ ...mono, fontSize: 10, color: 'var(--text-lo)', padding: '5px 10px', maxWidth: 280, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={metaStr}>{metaStr}</td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ── Admin Panel ──────────────────────────────────────────────────────────────
+
 export default function AdminPanel() {
-  const [tab, setTab] = useState<'pending' | 'approved' | 'users' | 'pending_users'>('pending');
+  const [tab, setTab] = useState<'pending' | 'approved' | 'users' | 'pending_users' | 'logs'>('pending');
   const [pending, setPending] = useState<any[]>([]);
   const [approved, setApproved] = useState<any[]>([]);
   const [users, setUsers] = useState<any[]>([]);
@@ -72,14 +166,14 @@ export default function AdminPanel() {
 
   const approve = async (id: string) => {
     setActLoad(id);
-    try { await adminApi.approveAgent(id); setOk('Agent approved'); setPending(p => p.filter(a => a.id !== id)); fetchData(); }
-    catch (e: any) { setError(e.message); }
+    try { await adminApi.approveAgent(id); setOk('Agent approved'); setPending(p => p.filter(a => a.id !== id)); fetchData(); toast.success('Agent approved'); }
+    catch (e: any) { setError(e.message); toast.error('Approve failed', e.message); }
     finally { setActLoad(null); }
   };
   const reject = async (id: string) => {
     setActLoad(id);
-    try { await adminApi.rejectAgent(id); setOk('Agent rejected'); setPending(p => p.filter(a => a.id !== id)); }
-    catch (e: any) { setError(e.message); }
+    try { await adminApi.rejectAgent(id); setOk('Agent rejected'); setPending(p => p.filter(a => a.id !== id)); toast.success('Agent rejected'); }
+    catch (e: any) { setError(e.message); toast.error('Reject failed', e.message); }
     finally { setActLoad(null); }
   };
   const deleteAgent = async (id: string, name: string) => {
@@ -90,25 +184,30 @@ export default function AdminPanel() {
       setOk(`Agent ${name} deleted`);
       setPending(p => p.filter(a => a.id !== id));
       setApproved(a => a.filter(a => a.id !== id));
+      toast.success('Agent deleted', name);
     }
-    catch (e: any) { setError(e.message); }
+    catch (e: any) { setError(e.message); toast.error('Delete failed', e.message); }
     finally { setActLoad(null); }
   };
 
   const approveUser = async (id: string) => {
     setActLoad(id);
     try {
-      await fetch(`/api/admin/users/${id}/approve`, { method: 'POST', headers: { 'Authorization': `Bearer ${localStorage.getItem('claw_token')}` } });
+      const res = await fetch(`/api/admin/users/${id}/approve`, { method: 'POST', headers: { 'Authorization': `Bearer ${localStorage.getItem('claw_token')}` } });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
       setOk('User approved'); setPendingUsers(p => p.filter(u => u.id !== id)); fetchData();
-    } catch (e: any) { setError(e.message); }
+      toast.success('User approved');
+    } catch (e: any) { setError(e.message); toast.error('Approve failed', e.message); }
     finally { setActLoad(null); }
   };
   const rejectUser = async (id: string) => {
     setActLoad(id);
     try {
-      await fetch(`/api/admin/users/${id}/reject`, { method: 'POST', headers: { 'Authorization': `Bearer ${localStorage.getItem('claw_token')}` } });
+      const res = await fetch(`/api/admin/users/${id}/reject`, { method: 'POST', headers: { 'Authorization': `Bearer ${localStorage.getItem('claw_token')}` } });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
       setOk('User rejected'); setPendingUsers(p => p.filter(u => u.id !== id));
-    } catch (e: any) { setError(e.message); }
+      toast.success('User rejected');
+    } catch (e: any) { setError(e.message); toast.error('Reject failed', e.message); }
     finally { setActLoad(null); }
   };
 
@@ -135,6 +234,7 @@ export default function AdminPanel() {
     { id: 'approved', label: 'Approved Agents', icon: <UserCheck size={11} />, count: approved.length, color: '#10b981' },
     { id: 'pending_users', label: 'Pending Users', icon: <Users size={11} />, count: pendingUsers.length, color: '#f87171' },
     { id: 'users', label: 'All Users', icon: <UserCheck size={11} />, count: users.length, color: '#60a5fa' },
+    { id: 'logs', label: 'Server Logs', icon: <ScrollText size={11} />, count: null, color: '#a78bfa' },
   ];
 
   if (loading) return (
@@ -165,10 +265,10 @@ export default function AdminPanel() {
 
       {/* Stats */}
       <div className="grid grid-cols-3 gap-3">
-        {TABS.map(t => (
+        {TABS.filter(t => t.count !== null).map(t => (
           <div key={t.id} className="ops-stat" style={{ cursor: 'pointer', borderColor: tab === t.id ? t.color + '44' : undefined }} onClick={() => setTab(t.id as any)}>
             <div className="flex items-center justify-between mb-2">
-              <span className="ops-label">{t.label.split(' ')[0] + ' ' + (t.label.split(' ')[1] || '')}</span>
+              <span className="ops-label">{t.label}</span>
               <span style={{ color: t.color }}>{t.icon}</span>
             </div>
             <div style={{ ...mono, fontSize: 28, fontWeight: 700, color: t.color }}>{t.count}</div>
@@ -197,18 +297,20 @@ export default function AdminPanel() {
             borderColor: tab === t.id ? 'var(--ink-4)' : 'transparent',
             borderBottomColor: tab === t.id ? 'var(--ink-2)' : 'transparent',
           }}>
-            {t.id === 'pending' ? 'Pending' : t.id === 'approved' ? 'Approved' : 'Users'}
-            <span style={{ marginLeft: 6, fontSize: 9, opacity: 0.7 }}>({t.count})</span>
+            {t.label}
+            {t.count !== null && <span style={{ marginLeft: 6, fontSize: 9, opacity: 0.7 }}>({t.count})</span>}
           </button>
         ))}
       </div>
 
-      {/* Search */}
-      <div style={{ position: 'relative', maxWidth: 360 }}>
-        <Search size={11} style={{ position: 'absolute', left: 10, top: '50%', transform: 'translateY(-50%)', color: 'var(--text-lo)' }} />
-        <input type="text" placeholder={`Search ${tab}...`} value={search} onChange={e => { setSearch(e.target.value); setOk(null); setError(null); }}
-          className="ops-input" style={{ paddingLeft: 28, width: '100%' }} />
-      </div>
+      {/* Search (not shown on logs tab) */}
+      {tab !== 'logs' && (
+        <div style={{ position: 'relative', maxWidth: 360 }}>
+          <Search size={11} style={{ position: 'absolute', left: 10, top: '50%', transform: 'translateY(-50%)', color: 'var(--text-lo)' }} />
+          <input type="text" placeholder={`Search ${tab}...`} value={search} onChange={e => { setSearch(e.target.value); setOk(null); setError(null); }}
+            className="ops-input" style={{ paddingLeft: 28, width: '100%' }} />
+        </div>
+      )}
 
       {/* Pending */}
       {tab === 'pending' && (
@@ -343,6 +445,13 @@ export default function AdminPanel() {
               </tbody>
             </table>
           )}
+        </div>
+      )}
+
+      {/* Server Logs */}
+      {tab === 'logs' && (
+        <div className="ops-panel">
+          <LogViewer />
         </div>
       )}
     </div>

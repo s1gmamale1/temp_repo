@@ -43,8 +43,11 @@ function resolveToolsForAgent(agent) {
   return null; // null = don't pass --allowedTools, Claude gets everything
 }
 
-function callClaudeCLI(prompt, workspacePath, toolsOverride, timeoutMs = 120000, onChunk = null) {
+function callClaudeCLI(prompt, workspacePath, toolsOverride, timeoutMs = 120000, onChunk = null, model = null) {
   const args = ['--print', '--dangerously-skip-permissions', '--input-format', 'text'];
+  if (model) {
+    args.push('--model', model);
+  }
   if (toolsOverride && toolsOverride.length > 0) {
     args.push('--allowedTools', toolsOverride.join(','));
   }
@@ -366,6 +369,15 @@ function getPresetContent(type, name, sectionNames) {
 }
 
 // ── System prompt per agent type ─────────────────────────────────────────────
+function loadSoulContent(agent) {
+  if (!agent.soul_path) return '';
+  try {
+    const soulPath = path.resolve(__dirname, '..', agent.soul_path);
+    const content = fs.readFileSync(soulPath, 'utf-8');
+    return `\n\n--- SOUL (personality & guidelines) ---\n${content}\n--- END SOUL ---\n`;
+  } catch { return ''; }
+}
+
 function buildSystemPrompt(agent, project) {
   const type = agent.agent_type || 'worker';
   const skills = (() => {
@@ -375,6 +387,7 @@ function buildSystemPrompt(agent, project) {
   const projectCtx = project
     ? `\nProject: ${project.name}${project.description ? `\nContext: ${project.description}` : ''}`
     : '';
+  const soulBlock = loadSoulContent(agent);
 
   if (type === 'pm') {
     const modeLabel = agent.current_mode ? agent.current_mode.replace(/_/g, ' ').toUpperCase() : '';
@@ -389,7 +402,7 @@ function buildSystemPrompt(agent, project) {
 
 Your responsibilities: Break work into clear deliverables, identify dependencies, define acceptance criteria, coordinate team effort.${projectCtx}
 
-Respond with structured, actionable output. Use markdown. Be concise and specific — not theoretical.${presetSection}`;
+Respond with structured, actionable output. Use markdown. Be concise and specific — not theoretical.${presetSection}${soulBlock}`;
   }
 
   if (type === 'rnd') {
@@ -405,7 +418,7 @@ Respond with structured, actionable output. Use markdown. Be concise and specifi
 
 Your responsibilities: Research emerging solutions, evaluate technologies, surface insights and recommendations.${projectCtx}
 
-Respond with findings, analysis, and concrete recommendations. Cite specific technologies, tools, or approaches. Use markdown.${presetSection}`;
+Respond with findings, analysis, and concrete recommendations. Cite specific technologies, tools, or approaches. Use markdown.${presetSection}${soulBlock}`;
   }
 
   // Worker
@@ -423,12 +436,24 @@ Respond with findings, analysis, and concrete recommendations. Cite specific tec
 
 Your responsibilities: Implement features, write code, solve technical problems, deliver working solutions.${projectCtx}
 
-Respond with concrete technical output — code, configuration, implementation steps, or technical specs. Use markdown with code blocks where relevant.${presetSection}`;
+Respond with concrete technical output — code, configuration, implementation steps, or technical specs. Use markdown with code blocks where relevant.${presetSection}${soulBlock}`;
 }
 
 // ── Select model ──────────────────────────────────────────────────────────────
-function selectModel(agent) {
+// Priority 1 = critical → Opus 4.6, Priority 2 = normal → Sonnet 4.6, Priority 3 = low → Haiku 4.5
+const PRIORITY_MODELS = {
+  1: 'claude-opus-4-6',       // critical tasks get the strongest model
+  2: 'claude-sonnet-4-6',     // normal tasks
+  3: 'claude-haiku-4-5',      // low priority — fast & cheap
+};
+
+function selectModel(agent, task = null) {
+  // Explicit model on agent always wins
   if (agent.current_model) return agent.current_model;
+  // Task priority drives model selection for Claude provider
+  if (task && task.priority && PRIORITY_MODELS[task.priority]) {
+    return PRIORITY_MODELS[task.priority];
+  }
   return DEFAULT_MODELS[agent.agent_type || 'worker'] || DEFAULT_MODELS.worker;
 }
 
@@ -571,6 +596,8 @@ async function executeTask(task, agent, project, onChunk = null) {
                            agent.agent_type === 'rnd' ? 'R&D Researcher' : 'Worker';
 
     const sessionCtx = buildSessionContext(agent);
+    const claudeModel = selectModel(agent, task);
+    const priorityLabel = task.priority === 1 ? 'CRITICAL' : task.priority === 2 ? 'normal' : 'low';
 
     const taskPrompt = [
       `You are ${agent.name}, an AI ${agentTypeLabel} agent.`,
@@ -578,7 +605,7 @@ async function executeTask(task, agent, project, onChunk = null) {
       `Project: ${project?.name || 'Unknown'}`,
       `Task: ${task.title}`,
       task.description ? `Description: ${task.description}` : null,
-      `Priority: ${task.priority === 1 ? 'critical' : task.priority === 2 ? 'normal' : 'low'}`,
+      `Priority: ${priorityLabel}`,
       ``,
       `Your working directory is: ${workspacePath}`,
       ``,
@@ -588,7 +615,7 @@ async function executeTask(task, agent, project, onChunk = null) {
 
     const timeoutMs    = parseInt(process.env.CLAUDE_TIMEOUT_MS || '120000', 10);
     const allowedTools = resolveToolsForAgent(agent);
-    const output = await callClaudeCLI(taskPrompt, workspacePath, allowedTools, timeoutMs, onChunk);
+    const output = await callClaudeCLI(taskPrompt, workspacePath, allowedTools, timeoutMs, onChunk, claudeModel);
     const files = listWorkspaceFiles(workspacePath);
     const filesNote = files.length > 0
       ? `\n\n---\n**Workspace files:** ${files.join(', ')}`
@@ -602,7 +629,7 @@ async function executeTask(task, agent, project, onChunk = null) {
       provider:       'claude',
       cost_mode:      'none',
       result:         output + filesNote,
-      model:          'claude-code',
+      model:          `claude-code/${claudeModel}`,
       tokens:         null,
       cost:           null,
       workspace_path: workspacePath,

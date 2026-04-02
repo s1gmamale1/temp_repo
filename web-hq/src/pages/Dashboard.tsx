@@ -1,6 +1,6 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { Link } from 'react-router-dom';
-import { projectsApi, machinesApi, agentsApi } from '../services/api';
+import { projectsApi, machinesApi, agentsApi, wsClient } from '../services/api';
 import { Bot, FolderKanban, CheckSquare, DollarSign, ArrowRight, Zap, Loader2, AlertCircle, Server, WifiOff, Trash2, Cpu } from 'lucide-react';
 
 function timeAgo(ts: string) {
@@ -12,6 +12,26 @@ function timeAgo(ts: string) {
   const h = Math.floor(m / 60);
   if (h < 24) return h + 'h ago';
   return Math.floor(h / 24) + 'd ago';
+}
+
+function agentStatusInfo(a: any) {
+  const hb = a.last_heartbeat || a.rnd_last_run;
+  if (!hb) return { label: 'OFFLINE', cls: 'ops-badge-red', dot: 'ops-dot-red', dimmed: true };
+  const mins = (Date.now() - new Date(hb).getTime()) / 60000;
+  if (mins < 5) return { label: 'ONLINE', cls: 'ops-badge-green', dot: 'ops-dot-green ops-dot-pulse', dimmed: false };
+  if (mins < 30) return { label: 'IDLE', cls: 'ops-badge-amber', dot: 'ops-dot-amber', dimmed: false };
+  return { label: 'OFFLINE', cls: 'ops-badge-red', dot: 'ops-dot-red', dimmed: true };
+}
+
+function agentInitials(name: string) {
+  return name.split(/\s+/).slice(0, 2).map(w => w[0]?.toUpperCase() || '').join('') || '??';
+}
+
+const AVATAR_COLORS = ['#06b6d4', '#10b981', '#8b5cf6', '#f59e0b', '#3b82f6', '#ef4444', '#ec4899'];
+function avatarColor(name: string) {
+  let h = 0;
+  for (let i = 0; i < name.length; i++) h = (h * 31 + name.charCodeAt(i)) & 0xffffffff;
+  return AVATAR_COLORS[Math.abs(h) % AVATAR_COLORS.length];
 }
 
 function machineStatus(m: any) {

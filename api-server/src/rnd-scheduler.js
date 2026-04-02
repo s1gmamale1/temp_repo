@@ -71,6 +71,20 @@ async function executeRndResearch(agentId, wsManager) {
   const sources = presetContent ? extractSection(presetContent, 'Research Sources') : null;
   const outputFormat = presetContent ? extractSection(presetContent, 'Output Format') : null;
 
+  // Fetch real-time news context
+  let newsContext = '';
+  try {
+    const { fetchNewsForDivision, buildNewsContext } = require('./news-fetcher');
+    console.log(`[RND] Fetching live news for ${agent.rnd_division}...`);
+    const news = await fetchNewsForDivision(agent.rnd_division);
+    newsContext = buildNewsContext(news, 8);
+    const totalItems = (news.hackernews?.length || 0) + (news.reddit?.length || 0) +
+                       (news.web?.length || 0) + (news.github?.length || 0);
+    console.log(`[RND] Fetched ${totalItems} live news items for context`);
+  } catch (e) {
+    console.warn('[RND] News fetch failed, proceeding without live context:', e.message);
+  }
+
   // Build research prompt
   const systemPrompt = [
     `You are an autonomous R&D agent specializing in ${agent.rnd_division.replace(/_/g, ' ')}.`,
@@ -84,10 +98,16 @@ async function executeRndResearch(agentId, wsManager) {
     `## Key Findings\n[Numbered list of discoveries]\n`,
     `## Affected Areas\n[Which presets or systems are affected]\n`,
     `## Recommended Actions\n[Specific actionable recommendations]\n`,
-    `## Sources\n[List sources consulted]`,
+    `## Sources\n[List sources consulted with URLs]`,
   ].filter(Boolean).join('\n');
 
-  const userPrompt = `Run your scheduled research scan for ${agent.rnd_division.replace(/_/g, ' ')}. Report any new developments, emerging tools, security issues, or notable changes since your last scan. Focus on actionable findings.`;
+  const userPrompt = [
+    `Run your scheduled research scan for ${agent.rnd_division.replace(/_/g, ' ')}.`,
+    newsContext ? `\nYou have access to the following REAL-TIME news and community posts fetched just now:\n${newsContext}` : '',
+    `\nAnalyze these live items alongside your knowledge. Identify the most significant developments,`,
+    `emerging tools, risks, or opportunities. Reference specific articles or posts where relevant.`,
+    `Focus on actionable, high-signal findings. Be concise and precise.`,
+  ].filter(Boolean).join('\n');
 
   // Get model for this division
   const model = agent.current_model || DIVISION_MODELS[agent.rnd_division] || 'claude-opus-4-6';

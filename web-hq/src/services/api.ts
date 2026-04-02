@@ -474,6 +474,7 @@ export const agentsApi = {
     const query = new URLSearchParams(params as Record<string, string>).toString();
     return cachedFetch(`/api/agents${query ? `?${query}` : ''}`);
   },
+  liveStatus: () => fetchApi('/api/agents/live-status'),
   getById: (id: string) => cachedFetch(`/api/agents/${id}`),
   updateStatus: (id: string, status: string) =>
     fetchApi(`/api/agents/${id}/status`, { method: 'POST', body: JSON.stringify({ status }) }),
@@ -507,6 +508,12 @@ export const adminApi = {
   // Permanently delete an agent
   deleteAgent: (agentId: string) =>
     fetchApi(`/api/admin/agents/${agentId}`, { method: 'DELETE' }),
+
+  // Server logs (admin only)
+  getLogs: (params?: { limit?: number; level?: string }) => {
+    const query = new URLSearchParams(params as Record<string, string>).toString();
+    return fetchApi(`/api/logs${query ? `?${query}` : ''}`);
+  },
 };
 
 // Orchestration Engine API
@@ -861,11 +868,52 @@ export interface RndFinding {
   rnd_division?: string;
 }
 
+export interface NewsItem {
+  id: string;
+  source: 'hackernews' | 'reddit' | 'web' | 'github';
+  source_label: string;
+  title: string;
+  url: string;
+  discussion_url?: string;
+  score: number;
+  comments: number;
+  author: string;
+  created_at: string;
+  tags: string[];
+  // Reddit-specific
+  subreddit?: string;
+  flair?: string | null;
+  thumbnail?: string | null;
+  // GitHub-specific
+  language?: string | null;
+  stars?: number;
+  forks?: number;
+}
+
+export interface NewsResponse {
+  hackernews: NewsItem[];
+  reddit: NewsItem[];
+  web: NewsItem[];
+  github: NewsItem[];
+  totals: { hackernews: number; reddit: number; web: number; github: number };
+  fetched_at: string;
+  cached: boolean;
+  age_seconds: number;
+}
+
 export const rndApi = {
   getStatus: (): Promise<{ agents: RndAgent[]; count: number }> =>
     fetchApi('/api/rnd/status'),
   getFeed: (limit = 50, offset = 0): Promise<{ messages: RndFinding[]; total: number }> =>
     fetchApi(`/api/rnd/feed?limit=${limit}&offset=${offset}`),
+  getNews: (options?: { source?: string; division?: string; refresh?: boolean }): Promise<NewsResponse> => {
+    const params = new URLSearchParams();
+    if (options?.source) params.set('source', options.source);
+    if (options?.division) params.set('division', options.division);
+    if (options?.refresh) params.set('refresh', 'true');
+    const qs = params.toString();
+    return fetchApi(`/api/rnd/news${qs ? '?' + qs : ''}`);
+  },
   execute: (agentId: string): Promise<{ success: boolean; impact_level: string; message_id: string }> =>
     fetchApi(`/api/rnd/${agentId}/execute`, { method: 'POST' }),
   updateSchedule: (agentId: string, schedule: string) =>

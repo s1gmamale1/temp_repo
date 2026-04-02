@@ -788,13 +788,52 @@ class SQLiteAdapter {
       [`ALTER TABLE manager_agents ADD COLUMN ollama_host TEXT;`, 'ollama_host'],
       [`ALTER TABLE manager_agents ADD COLUMN session_state TEXT DEFAULT '{}';`, 'session_state'],
       [`ALTER TABLE manager_agents ADD COLUMN monthly_budget_usd REAL;`, 'monthly_budget_usd'],
+      [`ALTER TABLE manager_agents ADD COLUMN current_task_id TEXT;`, 'current_task_id'],
+      [`ALTER TABLE manager_agents ADD COLUMN current_task_title TEXT;`, 'current_task_title'],
+      [`ALTER TABLE manager_agents ADD COLUMN current_phase TEXT;`, 'current_phase'],
+      [`ALTER TABLE manager_agents ADD COLUMN phase_started_at TEXT;`, 'phase_started_at'],
+      [`ALTER TABLE manager_agents ADD COLUMN status_text TEXT;`, 'status_text'],
+      [`ALTER TABLE manager_agents ADD COLUMN soul_path TEXT;`, 'soul_path'],
+      [`ALTER TABLE manager_agents ADD COLUMN department TEXT;`, 'department'],
+      [`ALTER TABLE manager_agents ADD COLUMN purpose TEXT;`, 'purpose'],
     ];
     for (const [sql] of agentCols) {
       try { this.db.exec(sql); } catch (e) { /* column already exists */ }
     }
 
+    // ========== AGENT LOGS TABLE ==========
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS agent_logs (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        agent_id TEXT NOT NULL REFERENCES manager_agents(id) ON DELETE CASCADE,
+        level TEXT DEFAULT 'info' CHECK (level IN ('info','warn','error','phase','task')),
+        message TEXT NOT NULL,
+        task_id TEXT,
+        metadata TEXT DEFAULT '{}',
+        created_at TEXT DEFAULT (datetime('now'))
+      );
+    `);
+    this.db.exec(`
+      CREATE INDEX IF NOT EXISTS idx_agent_logs_agent ON agent_logs(agent_id);
+      CREATE INDEX IF NOT EXISTS idx_agent_logs_created ON agent_logs(created_at);
+    `);
+    // Auto-prune: keep only last 500 logs per agent (triggered by INSERT trigger)
+    this.db.exec(`
+      CREATE TRIGGER IF NOT EXISTS trg_agent_logs_prune
+      AFTER INSERT ON agent_logs
+      BEGIN
+        DELETE FROM agent_logs WHERE id IN (
+          SELECT id FROM agent_logs WHERE agent_id = NEW.agent_id
+          ORDER BY created_at DESC LIMIT -1 OFFSET 500
+        );
+      END;
+    `);
+
     // tasks.log_path — stores path to Claude CLI execution log
     try { this.db.exec(`ALTER TABLE tasks ADD COLUMN log_path TEXT;`); } catch (e) { /* already exists */ }
+    // tasks.cancelled_by — who cancelled the task
+    try { this.db.exec(`ALTER TABLE tasks ADD COLUMN cancelled_by TEXT REFERENCES users(id);`); } catch (e) { /* already exists */ }
+    try { this.db.exec(`ALTER TABLE tasks ADD COLUMN cancelled_at TEXT;`); } catch (e) { /* already exists */ }
     this.db.exec(`CREATE INDEX IF NOT EXISTS idx_manager_agents_type ON manager_agents(agent_type);`);
     this.db.exec(`CREATE INDEX IF NOT EXISTS idx_manager_agents_mode ON manager_agents(current_mode);`);
 

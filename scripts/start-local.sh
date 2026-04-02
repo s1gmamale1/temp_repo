@@ -25,6 +25,7 @@ API_PID_FILE="$LOG_DIR/api-server.pid"
 WEB_PID_FILE="$LOG_DIR/web-hq.pid"
 AGENT_PID_FILE="$LOG_DIR/agent.pid"
 NOTIFIER_PID_FILE="$LOG_DIR/notifier.pid"
+SUPERVISOR_PID_FILE="$LOG_DIR/pids/supervisor.pid"
 AGENTS_DIR="$LOG_DIR/agents"
 
 C_G='\033[0;32m'
@@ -49,7 +50,7 @@ check_node() {
   local major=${ver//[^0-9.]*/}
   local maj=${major%%.*}
   maj=${maj//v/}
-  if (( maj < 18 )); then
+  if [ "$maj" -lt 18 ] 2>/dev/null; then
     warn "Node.js $ver detected. Requires >= 18.0.0"
   fi
 }
@@ -195,10 +196,26 @@ respawn_claude() {
   fi
 }
 
+# ── Start Agent Supervisor ────────────────────────────────────────────────────
+start_supervisor() {
+  if [[ -f "$SUPERVISOR_PID_FILE" ]] && kill -0 "$(cat "$SUPERVISOR_PID_FILE")" 2>/dev/null; then
+    warn "Supervisor already running (PID $(cat "$SUPERVISOR_PID_FILE"))"
+    return
+  fi
+  mkdir -p "$LOG_DIR/pids"
+  nohup bash "$REPO_ROOT/scripts/agent-supervisor.sh" >> "$LOG_DIR/supervisor.log" 2>&1 &
+  sleep 1
+  if [[ -f "$SUPERVISOR_PID_FILE" ]] && kill -0 "$(cat "$SUPERVISOR_PID_FILE")" 2>/dev/null; then
+    ok "Agent supervisor started (PID $(cat "$SUPERVISOR_PID_FILE")) — auto-restarts crashed agents"
+  else
+    warn "Agent supervisor may not have started — check $LOG_DIR/supervisor.log"
+  fi
+}
+
 # ── Stop ──────────────────────────────────────────────────────────────────────
 stop_all() {
   log "Stopping services..."
-  for pf in "$API_PID_FILE" "$WEB_PID_FILE" "$AGENT_PID_FILE" "$NOTIFIER_PID_FILE"; do
+  for pf in "$API_PID_FILE" "$WEB_PID_FILE" "$AGENT_PID_FILE" "$NOTIFIER_PID_FILE" "$LOG_DIR/backup.pid"; do
     if [[ -f "$pf" ]]; then
       local pid
       pid=$(cat "$pf")
@@ -208,6 +225,15 @@ stop_all() {
       rm -f "$pf"
     fi
   done
+  # Stop supervisor
+  if [[ -f "$SUPERVISOR_PID_FILE" ]]; then
+    local pid
+    pid=$(cat "$SUPERVISOR_PID_FILE")
+    if kill -0 "$pid" 2>/dev/null; then
+      kill "$pid" && ok "Stopped supervisor PID $pid"
+    fi
+    rm -f "$SUPERVISOR_PID_FILE"
+  fi
   # Stop all named agents
   if [[ -d "$AGENTS_DIR" ]]; then
     for pf in "$AGENTS_DIR"/*.pid; do
@@ -242,6 +268,11 @@ case "$CMD" in
     start_web
     start_agents
     start_notifier
+    start_supervisor
+    # One-shot backup on startup + scheduled backups in background
+    bash "$REPO_ROOT/scripts/backup-db.sh" 2>/dev/null
+    nohup bash "$REPO_ROOT/scripts/backup-db.sh" --schedule >> "$LOG_DIR/backup.log" 2>&1 &
+    echo $! > "$LOG_DIR/backup.pid"
     respawn_claude
     echo ""
     ok "Stack is up. Open http://localhost:5173"

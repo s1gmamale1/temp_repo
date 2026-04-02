@@ -3,6 +3,8 @@
  * Projects, Tasks, Costs, Chat, Auth
  */
 
+const { addLog } = require('./log-buffer');
+
 const {
   notifyTaskAssigned,
   notifyTaskAccepted,
@@ -230,7 +232,7 @@ async function createProject(request, reply) {
     });
     channelId = channel.id;
   } catch (err) {
-    console.error('Error creating project channel:', err);
+    request.log.error({ err }, 'Error creating project channel');
   }
 
   // Emit project:created WS event (global broadcast)
@@ -641,9 +643,9 @@ async function createTask(request, reply) {
       try {
         const { autoAssignTask } = require('./orchestration-engine');
         Promise.resolve(autoAssignTask(id, { assignedBy: userId }))
-          .catch(e => console.error('[Orchestration] Auto-assign failed:', e.message));
+          .catch(e => addLog('error', '[Orchestration] Auto-assign failed', { err: e.message }));
       } catch (e) {
-        console.error('[Orchestration] Auto-assign hook error:', e.message);
+        addLog('error', '[Orchestration] Auto-assign hook error', { err: e.message });
       }
     });
   }
@@ -666,7 +668,7 @@ async function createTask(request, reply) {
         dm_channel_id: dmChannel.id
       });
     } catch (dmErr) {
-      console.error('Error sending assignment DM:', dmErr);
+      request.log.warn({ err: dmErr }, 'Error sending assignment DM');
     }
   }
 
@@ -926,10 +928,11 @@ async function assignTask(request, reply) {
   const now = new Date().toISOString();
   const previousAgentId = task.agent_id;
 
-  // Update task assignment
+  // Update task assignment — reset status to pending if task was failed/cancelled so it can be retried
+  const resetStatus = ['failed', 'cancelled'].includes(task.status);
   db.prepare(`
-    UPDATE tasks 
-    SET agent_id = ?, assigned_by = ?, assigned_at = ?, updated_at = ? 
+    UPDATE tasks
+    SET agent_id = ?, assigned_by = ?, assigned_at = ?, updated_at = ?${resetStatus ? ", status = 'pending', accepted_at = NULL, started_at = NULL, completed_at = NULL" : ''}
     WHERE id = ?
   `).run(agent_id, userId, now, now, id);
 
@@ -966,7 +969,7 @@ async function assignTask(request, reply) {
       const message = formatTaskAssignmentDM(task, project, customMessage);
       await sendChannelMessage(userId, dmChannel.id, message);
     } catch (dmErr) {
-      console.error('Error sending assignment DM:', dmErr);
+      request.log.warn({ err: dmErr }, 'Error sending assignment DM');
     }
   }
 
@@ -987,7 +990,7 @@ async function assignTask(request, reply) {
     { id: task.project_id, name: task.project_name },
     agent_id,
     userId
-  ).catch(e => console.error('notifyTaskAssigned error:', e));
+  ).catch(e => addLog('error', 'notifyTaskAssigned error', { err: e?.message }));
 
   // Record in activity history
   try {
@@ -1038,6 +1041,12 @@ async function acceptTask(request, reply) {
     return { error: 'Only assigned agent can accept this task' };
   }
 
+  // Validate status — can only accept pending tasks
+  if (task.status !== 'pending') {
+    reply.code(400);
+    return { error: `Cannot accept task from status: ${task.status}` };
+  }
+
   const now = new Date().toISOString();
 
   db.prepare('UPDATE tasks SET accepted_at = ?, updated_at = ? WHERE id = ?')
@@ -1061,7 +1070,7 @@ async function acceptTask(request, reply) {
     { id, title: task.title, project_id: task.project_id, assigned_by: task.assigned_by },
     { id: task.project_id, name: task.project_name },
     userId
-  ).catch(e => console.error('notifyTaskAccepted error:', e));
+  ).catch(e => addLog('error', 'notifyTaskAccepted error', { err: e?.message }));
 
   try {
     db.prepare(`
@@ -1134,7 +1143,7 @@ async function rejectTask(request, reply) {
       const message = `🚫 TASK REJECTED\n\nTask: ${task.title}\nProject: ${task.project_name}\nRejected by: Agent\n${reason ? `Reason: ${reason}` : ''}`;
       await sendChannelMessage(userId, dmChannel.id, message);
     } catch (dmErr) {
-      console.error('Error sending rejection DM:', dmErr);
+      request.log.warn({ err: dmErr }, 'Error sending rejection DM');
     }
   }
 
@@ -1152,7 +1161,7 @@ async function rejectTask(request, reply) {
     { id: task.project_id, name: task.project_name },
     userId,
     reason
-  ).catch(e => console.error('notifyTaskRejected error:', e));
+  ).catch(e => addLog('error', 'notifyTaskRejected error', { err: e?.message }));
 
   try {
     db.prepare(`
@@ -1215,8 +1224,10 @@ async function startTask(request, reply) {
     return { error: 'Task already claimed by another agent' };
   }
 
-  // Agent is now working — update their status
+  // Agent is now working — update their status + current task tracking
   syncAgentStatus(db, task.agent_id);
+  db.prepare(`UPDATE manager_agents SET current_task_id=?, current_task_title=?, current_phase='starting', phase_started_at=? WHERE id=?`)
+    .run(id, task.title, now, task.agent_id);
 
   // Add system comment
   const content = comment ? `Task started. ${comment}` : 'Task started';
@@ -1225,14 +1236,25 @@ async function startTask(request, reply) {
     VALUES (?, ?, ?, ?, TRUE, ?, ?)
   `).run(generateId(), id, userId, content, JSON.stringify({ comment }), now);
 
+  const agentName = db.prepare('SELECT name FROM manager_agents WHERE id = ?').get(userId)?.name;
   wsManager.emitTaskStarted(task.project_id, {
     task_id: id,
     task_title: task.title,
     project_name: task.project_name,
     agent_id: userId,
-    agent_name: db.prepare('SELECT name FROM manager_agents WHERE id = ?').get(userId)?.name,
+    agent_name: agentName,
     started_at: now,
     comment
+  });
+
+  // Broadcast phase change for live status box
+  wsManager.broadcast('agent:phase', {
+    agent_id: task.agent_id,
+    agent_name: agentName,
+    phase: 'starting',
+    task_id: id,
+    task_title: task.title,
+    started_at: now,
   });
 
   return {
@@ -1282,8 +1304,18 @@ async function completeTask(request, reply) {
     WHERE id = ?
   `).run(result ? JSON.stringify(result) : null, now, now, id);
 
-  // Check if agent has other running tasks → set idle if none remain
+  // Clear agent's current task tracking + sync status
+  db.prepare(`UPDATE manager_agents SET current_task_id=NULL, current_task_title=NULL, current_phase=NULL, phase_started_at=NULL WHERE id=?`)
+    .run(task.agent_id);
   syncAgentStatus(db, task.agent_id);
+
+  const agentName = db.prepare('SELECT name FROM manager_agents WHERE id = ?').get(userId)?.name;
+
+  // Broadcast phase clear
+  wsManager.broadcast('agent:phase', {
+    agent_id: task.agent_id, agent_name: agentName,
+    phase: null, task_id: null, task_title: null,
+  });
 
   // Add system comment
   const content = comment ? `Task completed. ${comment}` : 'Task completed';
@@ -1297,7 +1329,7 @@ async function completeTask(request, reply) {
     task_title: task.title,
     project_name: task.project_name,
     agent_id: userId,
-    agent_name: db.prepare('SELECT name FROM manager_agents WHERE id = ?').get(userId)?.name,
+    agent_name: agentName,
     completed_at: now,
     result,
     comment
@@ -1308,7 +1340,7 @@ async function completeTask(request, reply) {
     { id: task.project_id, name: task.project_name },
     userId,
     result
-  ).catch(e => console.error('notifyTaskCompleted error:', e));
+  ).catch(e => addLog('error', 'notifyTaskCompleted error', { err: e?.message }));
 
   try {
     db.prepare(`
@@ -1389,7 +1421,7 @@ async function executeTaskRoute(request, reply) {
     const _providerLabel = execResult.skipped
       ? `simulation (${execResult.provider})`
       : `${execResult.provider}${execResult.model ? `/${execResult.model}` : ''}`;
-    console.log(`[execute] task=${id} provider=${_providerLabel} tokens=${execResult.tokens?.total ?? 0} cost=$${execResult.cost?.total_cost?.toFixed(6) ?? '0.000000'}`);
+    request.log.info({ taskId: id, provider: _providerLabel, tokens: execResult.tokens?.total ?? 0, cost: execResult.cost?.total_cost?.toFixed(6) ?? '0.000000' }, '[execute] task completed');
 
     const now = new Date().toISOString();
     const resultText = execResult.result;
@@ -1416,10 +1448,21 @@ async function executeTaskRoute(request, reply) {
       };
       db.prepare(`UPDATE manager_agents SET session_state=? WHERE id=?`)
         .run(JSON.stringify(newState), agent.id);
-    } catch (e) { console.error('[execute] session update error:', e.message); }
+    } catch (e) { request.log.warn({ err: e.message }, '[execute] session update error'); }
 
-    // Sync agent status — set to idle if no other running tasks
+    // Clear agent's current task tracking + sync status
+    db.prepare(`UPDATE manager_agents SET current_task_id=NULL, current_task_title=NULL, current_phase=NULL, phase_started_at=NULL WHERE id=?`)
+      .run(agent.id);
     syncAgentStatus(db, agent.id);
+
+    // Broadcast phase clear for live status box
+    wsManager.broadcast('agent:phase', {
+      agent_id: agent.id,
+      agent_name: agent.name,
+      phase: null,
+      task_id: null,
+      task_title: null,
+    });
 
     // Track token/cost usage in cost_records
     if (!execResult.skipped && execResult.tokens && execResult.cost) {
@@ -1449,11 +1492,10 @@ async function executeTaskRoute(request, reply) {
           JSON.stringify(metadata),
           now
         );
-      } catch (e) { console.error('[execute] cost tracking error:', e.message); }
+      } catch (e) { request.log.warn({ err: e.message }, '[execute] cost tracking error'); }
     }
 
     // WS broadcast
-    const wsManager = require('./websocket');
     wsManager.emitTaskCompleted(task.project_id, {
       task_id: id,
       task_title: task.title,
@@ -1485,7 +1527,7 @@ async function executeTaskRoute(request, reply) {
           { agent_id: agent.id }
         );
       }
-    } catch (e) { console.error('[execute] channel post error:', e.message); }
+    } catch (e) { request.log.warn({ err: e.message }, '[execute] channel post error'); }
 
     // Activity history
     try {
@@ -1509,7 +1551,7 @@ async function executeTaskRoute(request, reply) {
     };
 
   } catch (err) {
-    console.error('[execute] AI execution error:', err.message);
+    request.log.error({ err }, '[execute] AI execution error');
     // Mark task failed
     const now = new Date().toISOString();
     db.prepare(`UPDATE tasks SET status='failed', result=?, updated_at=? WHERE id=?`)
@@ -1662,7 +1704,7 @@ function handlePriorityEscalation(db, task, newPriority, oldPriority, wsManager)
           JSON.stringify({ new_priority: newPriority, helper_task_id: helperTaskId }), now);
       } catch (e) { /* ignore */ }
 
-      console.log(`[Escalation] Task "${task.title}" escalated to ${newPriority >= 5 ? 'urgent' : 'critical'} → helper ${helper.name} auto-assigned`);
+      addLog('info', `[Escalation] Task "${task.title}" escalated to ${newPriority >= 5 ? 'urgent' : 'critical'} → helper ${helper.name} auto-assigned`, { taskId: task.id, helperId: helper.id });
     } else {
       // No idle agent found — emit admin notification
       try {
@@ -1689,7 +1731,7 @@ function handlePriorityEscalation(db, task, newPriority, oldPriority, wsManager)
         );
       } catch (e) { /* ignore */ }
 
-      console.log(`[Escalation] Task "${task.title}" escalated — no idle agent found, admin notified`);
+      addLog('warn', `[Escalation] Task "${task.title}" escalated — no idle agent found, admin notified`, { taskId: task.id, priority: newPriority });
     }
   }
 
@@ -1739,9 +1781,9 @@ function handlePriorityEscalation(db, task, newPriority, oldPriority, wsManager)
           });
         } catch (e) { /* ignore */ }
 
-        console.log(`[De-escalation] Released helper agent ${releasedAgentId} → reassigned to task ${nextTask.id}`);
+        addLog('info', `[De-escalation] Released helper agent ${releasedAgentId} → reassigned to task ${nextTask.id}`, { agentId: releasedAgentId, taskId: nextTask.id });
       } else {
-        console.log(`[De-escalation] Released helper agent ${releasedAgentId} → no pending tasks, set idle`);
+        addLog('info', `[De-escalation] Released helper agent ${releasedAgentId} → no pending tasks, set idle`, { agentId: releasedAgentId });
       }
 
       // Log to activity_history
@@ -1812,7 +1854,7 @@ async function updateTaskPriority(request, reply) {
     try {
       handlePriorityEscalation(db, task, newPriority, oldPriority, wsManager);
     } catch (e) {
-      console.error('[Priority Escalation] Error:', e.message);
+      request.log.error({ err: e }, '[Priority Escalation] Error');
     }
   }
 
@@ -2478,7 +2520,7 @@ async function listChannelsRoute(request, reply) {
       count: channels.length
     };
   } catch (err) {
-    console.error('listChannelsRoute error:', err);
+    request.log.error({ err }, 'listChannelsRoute error');
     reply.code(500);
     return { error: err.message };
   }
@@ -3273,7 +3315,7 @@ async function registerAgentRoute(request, reply) {
         );
       }
     } catch (dmErr) {
-      console.error('Error creating agent DM channel:', dmErr);
+      request.log.warn({ err: dmErr }, 'Error creating agent DM channel');
     }
 
     reply.code(201);
@@ -3539,7 +3581,7 @@ async function assignAgentToProjectRouteV2(request, reply) {
         `).run(generateId(), projectChannel.id, agent_id, now);
       } catch (err) {
         // Agent might already be a member, ignore
-        console.log('Agent already member of project channel:', err.message);
+        request.log.info({ msg: err.message }, 'Agent already member of project channel');
       }
     }
 
@@ -3566,12 +3608,12 @@ async function assignAgentToProjectRouteV2(request, reply) {
         `[View Project] [Accept] [Decline]`
       );
     } catch (dmErr) {
-      console.error('Error sending assignment DM:', dmErr);
+      request.log.warn({ err: dmErr }, 'Error sending assignment DM');
     }
 
     // Persist notification in agent_notifications table
     notifyAgentProjectAssigned(agent_id, project, role, user.id)
-      .catch(e => console.error('notifyAgentProjectAssigned error:', e));
+      .catch(e => addLog('error', 'notifyAgentProjectAssigned error', { err: e?.message }));
 
     // Record in activity history
     try {
@@ -3588,10 +3630,10 @@ async function assignAgentToProjectRouteV2(request, reply) {
         const { autoCollectWorkersForPm } = require('./pm-delegation');
         collectedWorkers = autoCollectWorkersForPm(db, id, agent_id, wsManager);
         if (collectedWorkers.length) {
-          console.log(`[PM Auto-Collect] Collected ${collectedWorkers.length} workers for project ${id}`);
+          addLog('info', '[PM Auto-Collect] Collected ' + collectedWorkers.length + ' workers', { projectId: id });
         }
       } catch (collectErr) {
-        console.error('[PM Auto-Collect] Error collecting workers:', collectErr.message);
+        addLog('error', '[PM Auto-Collect] Error collecting workers', { err: collectErr.message });
       }
     }
 
@@ -3613,10 +3655,10 @@ async function assignAgentToProjectRouteV2(request, reply) {
             `).run(taskId, id, taskTitles[i], `Auto-generated by PM ${agent.name} (${agent.current_mode} mode)`, Math.min(i + 1, 5), now, now);
             generatedTasks.push({ id: taskId, title: taskTitles[i], priority: Math.min(i + 1, 5) });
           }
-          console.log(`[PM Automation] Generated ${generatedTasks.length} tasks for project ${id} from preset ${agent.current_mode}`);
+          addLog('info', '[PM Automation] Generated tasks', { count: generatedTasks.length, projectId: id, mode: agent.current_mode });
         }
       } catch (pmErr) {
-        console.error('[PM Automation] Error generating tasks:', pmErr.message);
+        addLog('error', '[PM Automation] Error generating tasks', { err: pmErr.message });
       }
     }
 
@@ -3627,10 +3669,10 @@ async function assignAgentToProjectRouteV2(request, reply) {
         const { delegateTasksToWorkers } = require('./pm-delegation');
         delegatedAssignments = delegateTasksToWorkers(id, generatedTasks, agent_id, db, wsManager);
         if (delegatedAssignments.length) {
-          console.log(`[PM Delegation] Assigned ${delegatedAssignments.length} tasks to workers`);
+          addLog('info', '[PM Delegation] Assigned tasks', { count: delegatedAssignments.length });
         }
       } catch (delErr) {
-        console.error('[PM Delegation] Error delegating tasks:', delErr.message);
+        addLog('error', '[PM Delegation] Error delegating tasks', { err: delErr.message });
       }
     }
 
@@ -3720,7 +3762,7 @@ async function removeAgentFromProjectRouteV2(request, reply) {
       `Removed by: ${user.name || user.id}`
     );
   } catch (dmErr) {
-    console.error('Error sending removal DM:', dmErr);
+    request.log.warn({ err: dmErr }, 'Error sending removal DM');
   }
 
   return {
@@ -3923,7 +3965,7 @@ async function updateAgentProjectRoleRoute(request, reply) {
     const { notifyAgentProjectRemoved } = require('./notifications');
     await notifyAgentProjectRemoved(agentId, project, user.id);
   } catch (err) {
-    console.error('Error sending removal notification:', err);
+    request.log.warn({ err }, 'Error sending removal notification');
   }
 }
 
@@ -4118,7 +4160,7 @@ async function registerManagerAgentRoute(request, reply) {
   // Notify admin in real-time that a new agent is waiting for approval
   wsManager.emitAgentRegistered({ id, name, handle: normalizedHandle, role, created_at: now });
   const { notifyNewAgentRegistration } = require('./notifications');
-  notifyNewAgentRegistration(id, name, 'user-scorpion-001').catch(e => console.error('notifyNewAgentRegistration:', e));
+  notifyNewAgentRegistration(id, name, 'user-scorpion-001').catch(e => addLog('error', 'notifyNewAgentRegistration error', { err: e?.message }));
 
   reply.code(201);
   return {
@@ -4196,7 +4238,7 @@ async function approveManagerAgentRoute(request, reply) {
     const { notifyAgentApproved } = require('./notifications');
     await notifyAgentApproved(id, user.id);
   } catch (err) {
-    console.error('Error sending approval notification:', err);
+    request.log.warn({ err }, 'Error sending approval notification');
   }
 
   // Auto-create DM channel between agent and admin (Scorpion)
@@ -4220,7 +4262,7 @@ async function approveManagerAgentRoute(request, reply) {
       `).run(generateId(), id, 'Your registration has been approved. You can now access projects and receive assignments.', JSON.stringify({ approved_by: user.id, channel_id: dmChannel.id }), now);
     }
   } catch (dmErr) {
-    console.error('Error creating agent DM channel:', dmErr);
+    request.log.warn({ err: dmErr }, 'Error creating agent DM channel');
   }
 
   wsManager.emitAgentApproved({ id, name: agent.name, handle: agent.handle }, user.id);
@@ -4555,7 +4597,7 @@ async function registerMachineRoute(request, reply) {
       try {
         db.prepare('INSERT OR IGNORE INTO machine_agents (id, machine_id, agent_id, started_at, status) VALUES (?, ?, ?, ?, ?)')
           .run(generateId(), machineId, agent_id, now, 'running');
-      } catch (e) { console.error('machine_agents link failed:', e.message); }
+      } catch (e) { addLog('error', 'machine_agents link failed', { err: e.message }); }
     }
     reply.code(existing ? 200 : 201);
     return { id: machineId, hostname, ip_address: ip, status: 'active', last_seen: now, created: !existing };
@@ -4578,7 +4620,7 @@ async function listMachinesRoute(request, reply) {
           LEFT JOIN manager_agents mg ON ma.agent_id = mg.id
           WHERE ma.machine_id = ? AND ma.status = 'running'
         `).all(m.id);
-      } catch (e) { console.error('machine agents query failed:', e.message); }
+      } catch (e) { addLog('error', 'machine agents query failed', { err: e.message }); }
       return { ...m, metadata: JSON.parse(m.metadata || '{}'), agents };
     });
 
@@ -5190,6 +5232,46 @@ async function getAgentsForChatRoute(request, reply) {
 
 
 
+// GET /api/agents/live-status - Compact live status for all approved agents (no auth)
+async function getAgentsLiveStatusRoute(request, reply) {
+  try {
+    const db = getDb();
+    const agents = db.prepare(`
+      SELECT id, name, handle, agent_type, role, status,
+             status_text, current_phase, current_task_id, current_task_title, last_heartbeat
+      FROM manager_agents
+      WHERE is_approved = 1
+      ORDER BY name ASC
+    `).all();
+
+    const now = Date.now();
+    return agents.map(a => {
+      let derivedStatus = 'offline';
+      if (a.last_heartbeat) {
+        const msSince = now - new Date(a.last_heartbeat).getTime();
+        if (msSince <= 5 * 60 * 1000) derivedStatus = 'online';
+        else if (msSince <= 30 * 60 * 1000) derivedStatus = 'idle';
+      }
+      return {
+        id: a.id,
+        name: a.name,
+        handle: a.handle,
+        type: a.agent_type || null,
+        role: a.role || null,
+        status: derivedStatus,
+        status_text: a.status_text || null,
+        current_phase: a.current_phase || null,
+        current_task_id: a.current_task_id || null,
+        current_task_title: a.current_task_title || null,
+        last_heartbeat: a.last_heartbeat || null,
+      };
+    });
+  } catch (err) {
+    reply.code(500);
+    return { error: err.message };
+  }
+}
+
 // GET /api/admin/users - List all users (admin only)
 async function listUsersRoute(request, reply) {
   const user = request.user;
@@ -5563,7 +5645,144 @@ module.exports = {
   listPresetsByTypeRoute,
   getPresetRoute,
   syncPresetsRoute,
+
+  // Agent Live Logs & Phase
+  postAgentLogRoute,
+  getAgentLogsRoute,
+  postAgentPhaseRoute,
+  postAgentStatusTextRoute,
+  getAgentSoulRoute,
 };
+
+// ============================================================================
+// AGENT LIVE LOGS & PHASE ROUTES
+// ============================================================================
+
+// POST /api/agents/:id/logs — agent submits a log entry
+async function postAgentLogRoute(request, reply) {
+  const db = getDb();
+  const { id } = request.params;
+  const { level = 'info', message, task_id, metadata } = request.body || {};
+
+  if (!message) { reply.code(400); return { error: 'message required' }; }
+
+  const agent = db.prepare('SELECT id, name FROM manager_agents WHERE id = ?').get(id);
+  if (!agent) { reply.code(404); return { error: 'Agent not found' }; }
+
+  const now = new Date().toISOString();
+  db.prepare(`INSERT INTO agent_logs (agent_id, level, message, task_id, metadata, created_at) VALUES (?,?,?,?,?,?)`)
+    .run(id, level, message, task_id || null, JSON.stringify(metadata || {}), now);
+
+  // Broadcast to all WS clients for live log panel
+  const wsManager = require('./websocket');
+  wsManager.broadcast('agent:log', {
+    agent_id: id,
+    agent_name: agent.name,
+    level,
+    message,
+    task_id: task_id || null,
+    created_at: now,
+  });
+
+  return { ok: true };
+}
+
+// GET /api/agents/:id/logs — fetch recent logs for an agent
+async function getAgentLogsRoute(request, reply) {
+  const db = getDb();
+  const { id } = request.params;
+  const { limit = 50, since } = request.query;
+
+  let query = 'SELECT * FROM agent_logs WHERE agent_id = ?';
+  const params = [id];
+
+  if (since) {
+    query += ' AND created_at > ?';
+    params.push(since);
+  }
+
+  query += ' ORDER BY created_at DESC LIMIT ?';
+  params.push(Math.min(Number(limit) || 50, 200));
+
+  const logs = db.prepare(query).all(...params);
+  return { logs: logs.reverse() };
+}
+
+// POST /api/agents/:id/phase — agent reports current execution phase
+async function postAgentPhaseRoute(request, reply) {
+  const db = getDb();
+  const { id } = request.params;
+  const { phase, task_id, task_title, status_text } = request.body || {};
+
+  const agent = db.prepare('SELECT id, name FROM manager_agents WHERE id = ?').get(id);
+  if (!agent) { reply.code(404); return { error: 'Agent not found' }; }
+
+  const now = new Date().toISOString();
+  db.prepare(`UPDATE manager_agents SET current_phase=?, current_task_id=?, current_task_title=?, phase_started_at=?, status_text=? WHERE id=?`)
+    .run(phase || null, task_id || null, task_title || null, phase ? now : null, status_text || null, id);
+
+  const wsManager = require('./websocket');
+  wsManager.broadcast('agent:phase', {
+    agent_id: id,
+    agent_name: agent.name,
+    phase: phase || null,
+    task_id: task_id || null,
+    task_title: task_title || null,
+    status_text: status_text || null,
+    started_at: phase ? now : null,
+  });
+
+  // Also log it
+  if (phase) {
+    db.prepare(`INSERT INTO agent_logs (agent_id, level, message, task_id, created_at) VALUES (?,?,?,?,?)`)
+      .run(id, 'phase', `Phase: ${phase}${task_title ? ` — ${task_title}` : ''}${status_text ? ` | ${status_text}` : ''}`, task_id || null, now);
+  }
+
+  return { ok: true };
+}
+
+// POST /api/agents/:id/status-text — agent reports what it's currently doing in natural language
+async function postAgentStatusTextRoute(request, reply) {
+  const db = getDb();
+  const { id } = request.params;
+  const { status_text } = request.body || {};
+
+  const agent = db.prepare('SELECT id, name FROM manager_agents WHERE id = ?').get(id);
+  if (!agent) { reply.code(404); return { error: 'Agent not found' }; }
+
+  const now = new Date().toISOString();
+  db.prepare(`UPDATE manager_agents SET status_text=?, updated_at=? WHERE id=?`)
+    .run(status_text || null, now, id);
+
+  const wsManager = require('./websocket');
+  wsManager.broadcast('agent:status_text', {
+    agent_id: id,
+    agent_name: agent.name,
+    status_text: status_text || null,
+    updated_at: now,
+  });
+
+  return { ok: true };
+}
+
+// GET /api/agents/:id/soul — get agent's soul.md content
+async function getAgentSoulRoute(request, reply) {
+  const db = getDb();
+  const { id } = request.params;
+  const agent = db.prepare('SELECT id, name, soul_path FROM manager_agents WHERE id = ?').get(id);
+  if (!agent) { reply.code(404); return { error: 'Agent not found' }; }
+  if (!agent.soul_path) { return { soul_path: null, content: null }; }
+
+  const path = require('path');
+  const fs = require('fs');
+  const fullPath = path.resolve(__dirname, '..', agent.soul_path);
+  try {
+    const content = fs.readFileSync(fullPath, 'utf-8');
+    return { soul_path: agent.soul_path, content };
+  } catch (e) {
+    return { soul_path: agent.soul_path, content: null, error: 'File not found' };
+  }
+}
 
 // ============================================================================
 // MACHINE-AGENT LINK ROUTES
@@ -5803,7 +6022,7 @@ async function updateProfileRoute(request, reply) {
 
     return { success: true, user };
   } catch (err) {
-    console.error('Update profile error:', err);
+    request.log.error({ err }, 'Update profile error');
     reply.code(500);
     return { error: 'Failed to update profile' };
   }
@@ -5837,7 +6056,7 @@ async function getPreferencesRoute(request, reply) {
 
     return { preferences };
   } catch (err) {
-    console.error('Get preferences error:', err);
+    request.log.error({ err }, 'Get preferences error');
     reply.code(500);
     return { error: 'Failed to get preferences' };
   }
@@ -5860,7 +6079,7 @@ async function updatePreferencesRoute(request, reply) {
 
     return { success: true, preferences: JSON.parse(preferences) };
   } catch (err) {
-    console.error('Update preferences error:', err);
+    request.log.error({ err }, 'Update preferences error');
     reply.code(500);
     return { error: 'Failed to save preferences' };
   }
@@ -5909,7 +6128,7 @@ async function executeRndRoute(request, reply) {
 
     return { success: true, ...result };
   } catch (err) {
-    console.error('R&D execution error:', err);
+    request.log.error({ err }, 'R&D execution error');
     reply.code(500);
     return { error: 'R&D execution failed' };
   }
@@ -5939,7 +6158,7 @@ async function updateRndScheduleRoute(request, reply) {
 
     return { success: true, agent_id: id, schedule };
   } catch (err) {
-    console.error('R&D schedule update error:', err);
+    request.log.error({ err }, 'R&D schedule update error');
     reply.code(500);
     return { error: 'Failed to update schedule' };
   }
@@ -5987,7 +6206,7 @@ async function getRndFindingsRoute(request, reply) {
       offset,
     };
   } catch (err) {
-    console.error('R&D findings error:', err);
+    request.log.error({ err }, 'R&D findings error');
     reply.code(500);
     return { error: 'Failed to get findings' };
   }
@@ -6027,7 +6246,7 @@ async function getRndFeedRoute(request, reply) {
       offset,
     };
   } catch (err) {
-    console.error('R&D feed error:', err);
+    request.log.error({ err }, 'R&D feed error');
     reply.code(500);
     return { error: 'Failed to get R&D feed' };
   }
@@ -6037,6 +6256,77 @@ module.exports.getRndStatusRoute = getRndStatusRoute;
 module.exports.executeRndRoute = executeRndRoute;
 module.exports.updateRndScheduleRoute = updateRndScheduleRoute;
 module.exports.getRndFindingsRoute = getRndFindingsRoute;
+module.exports.getRndFeedRoute = getRndFeedRoute;
+
+// ─── News cache (in-memory, refreshed on demand or every 10 min) ──────────────
+let _newsCache = null;
+let _newsCacheAt = 0;
+const NEWS_CACHE_TTL_MS = 10 * 60 * 1000; // 10 minutes
+
+async function getOrFetchNews(force = false) {
+  const now = Date.now();
+  if (!force && _newsCache && (now - _newsCacheAt) < NEWS_CACHE_TTL_MS) {
+    return { ..._newsCache, cached: true, age_seconds: Math.floor((now - _newsCacheAt) / 1000) };
+  }
+  const { fetchAllNews } = require('./news-fetcher');
+  _newsCache = await fetchAllNews();
+  _newsCacheAt = Date.now();
+  return { ..._newsCache, cached: false, age_seconds: 0 };
+}
+
+// GET /api/rnd/news — Fetch real-time news from HackerNews, Reddit, Lobsters, GitHub
+async function getRndNewsRoute(request, reply) {
+  try {
+    const force = request.query.refresh === 'true' || request.query.force === 'true';
+    const source = request.query.source; // optional filter: hackernews|reddit|web|github
+    const division = request.query.division;
+
+    let data;
+    if (division) {
+      const { fetchNewsForDivision } = require('./news-fetcher');
+      data = await fetchNewsForDivision(division);
+      data.cached = false;
+      data.age_seconds = 0;
+    } else {
+      data = await getOrFetchNews(force);
+    }
+
+    // Apply source filter if requested
+    if (source && ['hackernews', 'reddit', 'web', 'github'].includes(source)) {
+      return {
+        items: data[source] || [],
+        total: (data[source] || []).length,
+        source,
+        fetched_at: data.fetched_at,
+        cached: data.cached,
+        age_seconds: data.age_seconds,
+      };
+    }
+
+    // Return all sources with totals
+    return {
+      hackernews: data.hackernews || [],
+      reddit: data.reddit || [],
+      web: data.web || [],
+      github: data.github || [],
+      totals: {
+        hackernews: (data.hackernews || []).length,
+        reddit: (data.reddit || []).length,
+        web: (data.web || []).length,
+        github: (data.github || []).length,
+      },
+      fetched_at: data.fetched_at,
+      cached: data.cached,
+      age_seconds: data.age_seconds,
+    };
+  } catch (err) {
+    request.log.error({ err }, 'R&D news fetch error');
+    reply.code(500);
+    return { error: 'Failed to fetch news: ' + err.message };
+  }
+}
+
+module.exports.getRndNewsRoute = getRndNewsRoute;
 
 // ============================================================================
 // AGENT-TO-AGENT COMMUNICATION
@@ -6169,7 +6459,7 @@ function adminChatCleanupRoute(request, reply) {
     'DELETE FROM typing_indicators WHERE expires_at < ?'
   ).run(now).changes;
 
-  console.log(`[Chat Cleanup] Deleted: ${deletedMessages} messages, ${deletedChannels} channels, ${deletedTyping} typing indicators`);
+  request.log.info({ deletedMessages, deletedChannels, deletedTyping }, '[Chat Cleanup] Deleted records');
 
   return { deletedMessages, deletedChannels, deletedTyping };
 }

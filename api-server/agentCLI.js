@@ -313,27 +313,58 @@ ${taskList}
 Reply as ${AGENT_NAME} — naturally, concisely (2–4 sentences). Stay in character as an AI agent actively working on the above tasks. Reference your tasks when relevant.`;
 }
 
+// ── Remote log & phase reporting ─────────────────────────────────────────────
+function reportLog(agentId, userToken, level, message, taskId) {
+    req('POST', `/api/agents/${agentId}/logs`, { level, message, task_id: taskId }, userToken).catch(() => {});
+}
+
+function reportPhase(agentId, userToken, phase, taskId, taskTitle, statusText) {
+    req('POST', `/api/agents/${agentId}/phase`, { phase, task_id: taskId, task_title: taskTitle, status_text: statusText || null }, userToken).catch(() => {});
+}
+function reportStatusText(agentId, userToken, statusText) {
+    req('POST', `/api/agents/${agentId}/status-text`, { status_text: statusText }, userToken).catch(() => {});
+}
+
 // ── Task handling ─────────────────────────────────────────────────────────────
 async function handleTask(data, agentId, userToken) {
     const id = data.task_id || data.id;
     const title = data.task_title || data.title || id;
     log('TASK', `📋 Assigned: "${title}"`, C.A);
+    reportLog(agentId, userToken, 'task', `Assigned: "${title}"`, id);
+    reportPhase(agentId, userToken, 'assigned', id, title, `Received task: "${title}" — reviewing requirements`);
     await sleep(800);
 
     // Accept
+    reportPhase(agentId, userToken, 'accepting', id, title, `Analyzing task "${title}" — preparing to accept`);
     const acc = await req('POST', `/api/tasks/${id}/accept`, {}, userToken);
-    if (acc.status === 200) log('TASK', '✓ Accepted', C.G);
-    else { log('TASK', `Accept failed (${acc.status}): ${JSON.stringify(acc.body)}`, C.R); return; }
+    if (acc.status === 200) {
+        log('TASK', '✓ Accepted', C.G);
+        reportLog(agentId, userToken, 'task', `Accepted: "${title}"`, id);
+        reportStatusText(agentId, userToken, `Accepted task "${title}" — setting up workspace`);
+    } else {
+        log('TASK', `Accept failed (${acc.status}): ${JSON.stringify(acc.body)}`, C.R);
+        reportLog(agentId, userToken, 'error', `Accept failed (${acc.status})`, id);
+        reportPhase(agentId, userToken, null, null, null, null);
+        reportStatusText(agentId, userToken, 'Idle — waiting for tasks');
+        return;
+    }
 
     await sleep(400);
 
     // Start
+    reportPhase(agentId, userToken, 'starting', id, title, `Initializing execution environment for "${title}"`);
     const startRes = await req('POST', `/api/tasks/${id}/start`, {}, userToken);
     if (startRes.status !== 200) {
         log('TASK', `Start failed (${startRes.status}): ${JSON.stringify(startRes.body)}`, C.R);
+        reportLog(agentId, userToken, 'error', `Start failed (${startRes.status})`, id);
+        reportPhase(agentId, userToken, null, null, null, null);
+        reportStatusText(agentId, userToken, 'Idle — waiting for tasks');
         return;
     }
     log('TASK', `✓ Started — calling AI executor...`, C.C);
+    reportLog(agentId, userToken, 'task', `Started — calling AI executor`, id);
+    reportPhase(agentId, userToken, 'executing', id, title, `Working on "${title}" — calling AI model for analysis`);
+    reportStatusText(agentId, userToken, `Executing: researching and writing solution for "${title}"`);
 
     // Execute with real AI (server handles LLM call, cost tracking, result posting)
     const execRes = await req('POST', `/api/tasks/${id}/execute`, {}, userToken);
@@ -343,17 +374,27 @@ async function handleTask(data, agentId, userToken) {
         if (skipped) {
             log('TASK', `⚠  No OPENROUTER_API_KEY — execution simulated`, C.Y);
             log('TASK', `   Set OPENROUTER_API_KEY in api-server/.env for real AI`, C.Y);
+            reportLog(agentId, userToken, 'warn', `Execution simulated — no API key`, id);
+            reportStatusText(agentId, userToken, `Completed "${title}" (simulated — no API key)`);
         } else {
             const tokStr   = tokens ? `${tokens.total} tokens` : '';
             const costStr  = cost_usd ? ` · $${cost_usd.toFixed(6)}` : '';
             log('TASK', `✅ Completed [${model}] ${tokStr}${costStr}`, C.G);
+            reportLog(agentId, userToken, 'task', `Completed [${model}] ${tokStr}${costStr}`, id);
             if (result_preview) {
                 const lines = result_preview.substring(0, 120).replace(/\n/g, ' ');
                 log('TASK', `   → ${lines}...`, C.X);
             }
+            reportStatusText(agentId, userToken, `Finished "${title}" — delivered results using ${model || 'AI'}`);
         }
+        reportPhase(agentId, userToken, null, null, null, null);
+        // After a brief delay, show idle status
+        setTimeout(() => reportStatusText(agentId, userToken, 'Idle — waiting for tasks'), 3000);
     } else {
         log('TASK', `Execute failed (${execRes.status}): ${JSON.stringify(execRes.body)}`, C.R);
+        reportLog(agentId, userToken, 'error', `Execute failed (${execRes.status})`, id);
+        reportPhase(agentId, userToken, 'failed', id, title, `Failed to execute "${title}"`);
+        reportStatusText(agentId, userToken, `Task "${title}" failed — awaiting instructions`);
     }
 }
 
@@ -471,8 +512,11 @@ async function main() {
 
     // ── Step 3: Go online ──────────────────────────────────────────────────────
     const onlineRes = await req('POST', `/api/agents/${agentId}/status`, { status: 'online' }, userToken);
-    if (onlineRes.status === 200) log('INIT', '✅ Status set to ONLINE', C.G);
-    else log('INIT', `Status update: ${JSON.stringify(onlineRes.body)}`, C.Y);
+    if (onlineRes.status === 200) {
+        log('INIT', '✅ Status set to ONLINE', C.G);
+        reportLog(agentId, userToken, 'info', `${AGENT_NAME} came online (${AGENT_TYPE})`);
+        reportStatusText(agentId, userToken, 'Online — waiting for tasks');
+    } else log('INIT', `Status update: ${JSON.stringify(onlineRes.body)}`, C.Y);
 
     // ── Step 3b: Load own DM channels ─────────────────────────────────────────
     const myDMChannels = new Set();

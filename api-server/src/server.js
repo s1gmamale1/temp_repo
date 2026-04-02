@@ -1,11 +1,21 @@
 require('dotenv').config();
+const pino = require('pino');
+const { pinoStream } = require('./log-buffer');
+
+const _logLevel = process.env.LOG_LEVEL || 'info';
+const _isDev = process.env.NODE_ENV === 'development';
+
+// In development use pino-pretty for stdout; in production use multistream
+// so logs are captured in the in-memory buffer for /api/logs.
+const _pinoLogger = _isDev
+  ? pino({ level: _logLevel, transport: { target: 'pino-pretty', options: { colorize: true } } })
+  : pino({ level: _logLevel }, pino.multistream([
+      { stream: process.stdout },
+      { stream: pinoStream },
+    ]));
+
 const fastify = require('fastify')({
-  logger: {
-    level: process.env.LOG_LEVEL || 'info',
-    transport: process.env.NODE_ENV === 'development'
-      ? { target: 'pino-pretty', options: { colorize: true } }
-      : undefined
-  },
+  loggerInstance: _pinoLogger,
   pluginTimeout: 10000,
   disableRequestLogging: false,
   genReqId: () => `req-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`
@@ -191,13 +201,32 @@ async function buildServer() {
   fastify.get('/health', async () => {
     const db = getDb();
     let dbStatus = 'unknown';
+    let agentCounts = { online: 0, idle: 0, offline: 0, total: 0 };
+    let lastTaskExecution = null;
 
     try {
       db.prepare('SELECT 1').get();
       dbStatus = 'connected';
+
+      // Agent online counts
+      const agentRows = db.prepare("SELECT status, COUNT(*) as cnt FROM manager_agents GROUP BY status").all();
+      agentCounts.total = agentRows.reduce((s, r) => s + r.cnt, 0);
+      for (const row of agentRows) {
+        if (row.status === 'online' || row.status === 'active') agentCounts.online += row.cnt;
+        else if (row.status === 'idle') agentCounts.idle += row.cnt;
+        else agentCounts.offline += row.cnt;
+      }
+
+      // Last task execution time
+      const lastTask = db.prepare(
+        "SELECT completed_at, title FROM tasks WHERE completed_at IS NOT NULL ORDER BY completed_at DESC LIMIT 1"
+      ).get();
+      if (lastTask) {
+        lastTaskExecution = { at: lastTask.completed_at, title: lastTask.title };
+      }
     } catch (err) {
-      dbStatus = 'error';
-      fastify.log.error('Health check DB error:', err);
+      if (dbStatus !== 'connected') dbStatus = 'error';
+      fastify.log.error({ err }, 'Health check DB error');
     }
 
     return {
@@ -207,6 +236,8 @@ async function buildServer() {
       environment: NODE_ENV,
       version: process.env.npm_package_version || '1.2.0',
       database: dbStatus,
+      agents: agentCounts,
+      lastTaskExecution,
       memory: {
         used: Math.round(process.memoryUsage().heapUsed / 1024 / 1024),
         total: Math.round(process.memoryUsage().heapTotal / 1024 / 1024)
@@ -539,9 +570,26 @@ async function buildServer() {
   fastify.get('/api/admin/users/pending', { preHandler: authMiddleware }, routes.listPendingUsersRoute);
   fastify.post('/api/admin/users/:id/approve', { preHandler: authMiddleware }, routes.approveUserRoute);
   fastify.post('/api/admin/users/:id/reject', { preHandler: authMiddleware }, routes.rejectUserRoute);
+
+  // GET /api/logs — recent server log entries (admin only)
+  fastify.get('/api/logs', { preHandler: authMiddleware }, async (request, reply) => {
+    if (request.user?.role !== 'admin') {
+      reply.code(403);
+      return { error: 'Admin only' };
+    }
+    const { getLogs } = require('./log-buffer');
+    const limit = Math.min(parseInt(request.query.limit) || 100, 500);
+    const level = request.query.level || undefined;
+    return { logs: getLogs({ limit, level }) };
+  });
   fastify.post('/api/agents/:id/status', { preHandler: [authMiddleware, validate(updateAgentStatusSchema)] }, routes.updateManagerAgentStatusRoute);
   fastify.patch('/api/agents/:id', { preHandler: [authMiddleware, validate(updateAgentSchema)] }, routes.patchManagerAgentRoute);
   fastify.post('/api/agents/:id/heartbeat', { preHandler: optionalAuthMiddleware }, routes.agentHeartbeatRoute);
+  fastify.post('/api/agents/:id/logs', { preHandler: optionalAuthMiddleware }, routes.postAgentLogRoute);
+  fastify.get('/api/agents/:id/logs', { preHandler: authMiddleware }, routes.getAgentLogsRoute);
+  fastify.post('/api/agents/:id/phase', { preHandler: optionalAuthMiddleware }, routes.postAgentPhaseRoute);
+  fastify.post('/api/agents/:id/status-text', { preHandler: optionalAuthMiddleware }, routes.postAgentStatusTextRoute);
+  fastify.get('/api/agents/:id/soul', { preHandler: authMiddleware }, routes.getAgentSoulRoute);
   fastify.get('/api/agents/:id/notifications', { preHandler: authMiddleware }, routes.getAgentNotificationsRoute);
   fastify.post('/api/agents/:id/notifications/:notificationId/read', { preHandler: authMiddleware }, routes.markAgentNotificationReadRoute);
   fastify.post('/api/agents/:id/message', { preHandler: authMiddleware }, routes.agentMessageRoute);
@@ -596,6 +644,7 @@ async function buildServer() {
   // ============================================================================
   fastify.get('/api/rnd/status', { preHandler: authMiddleware }, routes.getRndStatusRoute);
   fastify.get('/api/rnd/feed', { preHandler: authMiddleware }, routes.getRndFeedRoute);
+  fastify.get('/api/rnd/news', { preHandler: authMiddleware }, routes.getRndNewsRoute);
   fastify.post('/api/rnd/:id/execute', { preHandler: authMiddleware }, routes.executeRndRoute);
   fastify.patch('/api/rnd/:id/schedule', { preHandler: [authMiddleware, validate(updateRndScheduleSchema)] }, routes.updateRndScheduleRoute);
   fastify.get('/api/rnd/:id/findings', { preHandler: authMiddleware }, routes.getRndFindingsRoute);
@@ -890,6 +939,10 @@ async function start() {
       }
     }, 60 * 1000);
     // ──────────────────────────────────────────────────────────────────────────
+
+    // ── Task Watchdog ─────────────────────────────────────────────────────────
+    const watchdog = require('./watchdog');
+    watchdog.start(getDb(), wsManager);
 
     // ── R&D autonomous agent scheduler ────────────────────────────────────────
     const { startRndScheduler } = require('./rnd-scheduler');

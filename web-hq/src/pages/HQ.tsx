@@ -32,6 +32,23 @@ interface Agent {
   skills?: string[];
   taskCount?: number;
   currentTask?: string | null;
+  current_task_id?: string | null;
+  current_task_title?: string | null;
+  current_phase?: string | null;
+  phase_started_at?: string | null;
+  status_text?: string | null;
+  department?: string | null;
+  purpose?: string | null;
+  soul_path?: string | null;
+}
+
+interface AgentLogEntry {
+  agent_id: string;
+  agent_name: string;
+  level: string;
+  message: string;
+  task_id?: string | null;
+  created_at: string;
 }
 
 interface Project {
@@ -204,6 +221,32 @@ function AgentCard({ agent, dragging = false, inProject = false, collecting = fa
         </div>
         <span className={getStatusDot(normalizeAgentStatus(agent))} />
       </div>
+
+      {/* Department + Purpose */}
+      {agent.department && (() => {
+        const deptInfo = DEPT_META[agent.department] || { color: '#94a3b8', icon: '●', short: agent.department.substring(0, 2).toUpperCase() };
+        return (
+          <div style={{
+            display: 'inline-flex', alignItems: 'center', gap: 4,
+            padding: '2px 6px', borderRadius: 2,
+            background: `${deptInfo.color}12`, border: `1px solid ${deptInfo.color}25`,
+            fontFamily: 'var(--font-mono)', fontSize: 8, fontWeight: 600,
+            color: deptInfo.color, letterSpacing: '0.06em',
+            marginBottom: 2,
+          }}>
+            {deptInfo.icon} {agent.department.toUpperCase().replace(/_/g, ' ')}
+          </div>
+        );
+      })()}
+      {agent.purpose && (
+        <div style={{
+          fontFamily: 'var(--font-mono)', fontSize: 7, color: 'var(--text-lo)',
+          marginBottom: 4, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+          fontStyle: 'italic', maxWidth: 200,
+        }}>
+          {agent.purpose}
+        </div>
+      )}
 
       {/* Mode badge */}
       {isAssigned ? (
@@ -443,6 +486,11 @@ export default function HQ() {
   const [recruitingProject, setRecruitingProject] = useState<string | null>(null);
   const collectTimers = useRef<ReturnType<typeof setTimeout>[]>([]);
   const [notifierStats, setNotifierStats] = useState<{ uptimeSec: number; sent: number; events: Record<string, number> } | null>(null);
+  const [agentPhases, setAgentPhases] = useState<Record<string, { phase: string | null; task_id: string | null; task_title: string | null; started_at: string | null; status_text: string | null }>>({});
+  const [agentStatusTexts, setAgentStatusTexts] = useState<Record<string, string>>({});
+  const [liveLogs, setLiveLogs] = useState<AgentLogEntry[]>([]);
+  const [logFilter, setLogFilter] = useState<string>('all');
+  const logsEndRef = useRef<HTMLDivElement>(null);
 
   const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 6 } }));
 
@@ -480,6 +528,11 @@ export default function HQ() {
     presetsApi.list().then(setPresets).catch(() => { /* presets are optional */ });
   }, []);
 
+  // Auto-scroll live logs
+  useEffect(() => {
+    logsEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+  }, [liveLogs]);
+
   // Poll notifier stats every 30s
   useEffect(() => {
     const fetchStats = () => {
@@ -507,6 +560,19 @@ export default function HQ() {
     };
     const onAssigned      = (d: any) => { pushActivity(`→ ${d.agent_name || 'Agent'} assigned to project`, 'agent'); load(); };
     const onRemoved       = (d: any) => { pushActivity(`← ${d.agent_name || 'Agent'} removed from project`, 'agent'); load(); };
+    const onPhase         = (d: any) => {
+      if (!d?.agent_id) return;
+      setAgentPhases(prev => ({ ...prev, [d.agent_id]: { phase: d.phase, task_id: d.task_id, task_title: d.task_title, started_at: d.started_at, status_text: d.status_text || null } }));
+      if (d.status_text) setAgentStatusTexts(prev => ({ ...prev, [d.agent_id]: d.status_text }));
+    };
+    const onStatusText    = (d: any) => {
+      if (!d?.agent_id) return;
+      setAgentStatusTexts(prev => ({ ...prev, [d.agent_id]: d.status_text || '' }));
+    };
+    const onLog           = (d: any) => {
+      if (!d?.agent_id) return;
+      setLiveLogs(prev => [...prev, d].slice(-200));
+    };
 
     wsClient.on('task:started',            onTaskStarted);
     wsClient.on('task:completed',          onTaskCompleted);
@@ -521,6 +587,9 @@ export default function HQ() {
     wsClient.on('agent:removed_from_project', onRemoved);
     wsClient.on('agent:registered',        load);
     wsClient.on('agent:approved',          load);
+    wsClient.on('agent:phase',             onPhase);
+    wsClient.on('agent:status_text',       onStatusText);
+    wsClient.on('agent:log',               onLog);
 
     return () => {
       wsClient.off('task:started',            onTaskStarted);
@@ -536,6 +605,9 @@ export default function HQ() {
       wsClient.off('agent:removed_from_project', onRemoved);
       wsClient.off('agent:registered',        load);
       wsClient.off('agent:approved',          load);
+      wsClient.off('agent:phase',             onPhase);
+      wsClient.off('agent:status_text',       onStatusText);
+      wsClient.off('agent:log',               onLog);
     };
   }, [load, pushActivity]);
 
@@ -734,44 +806,193 @@ export default function HQ() {
           ))}
         </div>
 
-        {/* ── HEARTBEAT PANEL ────────────────────────────────────────────── */}
-        <div className="neon-card" style={{ padding: '12px 16px' }}>
-          <div style={{ fontFamily: 'var(--font-mono)', fontSize: 9, color: 'var(--cyan)', letterSpacing: '0.15em', marginBottom: 10 }}>
-            // AGENT HEARTBEAT
+        {/* ── AGENT LIVE STATUS ────────────────────────────────────────── */}
+        <div className="neon-card" style={{ padding: '16px 20px', borderColor: 'rgba(34,211,238,0.2)' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 14 }}>
+            <Activity size={14} style={{ color: 'var(--cyan)' }} />
+            <div style={{ fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--cyan)', letterSpacing: '0.12em', fontWeight: 700 }}>
+              AGENT LIVE STATUS
+            </div>
+            <span className="ops-dot ops-dot-green ops-dot-pulse" />
+            <span style={{ fontFamily: 'var(--font-mono)', fontSize: 9, color: 'var(--text-lo)', marginLeft: 'auto' }}>
+              {agents.filter(a => normalizeAgentStatus(a) !== 'offline').length} online / {agents.length} total
+            </span>
           </div>
-          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(320px, 1fr))', gap: 12 }}>
             {agents.map(agent => {
               const s         = normalizeAgentStatus(agent);
               const typeColor = getTypeColor(agent.agent_type);
               const dotClass  = getStatusDot(s);
               const lastSeen  = agent.last_heartbeat ? fmtTime(agent.last_heartbeat) : '—';
+              const phaseData = agentPhases[agent.id] || { phase: agent.current_phase, task_id: agent.current_task_id, task_title: agent.current_task_title, started_at: agent.phase_started_at, status_text: null };
+              const phase     = phaseData.phase;
+              const phaseElapsed = phaseData.started_at ? fmtTime(phaseData.started_at) : null;
+              const PHASE_COLORS: Record<string, string> = {
+                assigned: '#60a5fa', accepting: '#818cf8', starting: '#f59e0b',
+                executing: '#f59e0b', completed: '#10b981', failed: '#ef4444',
+              };
+              const phaseColor = PHASE_COLORS[phase || ''] || '#f59e0b';
+              const isWorking = !!phase && phase !== 'failed';
+              const dept = agent.department || null;
+              const deptMeta = dept ? DEPT_META[dept] || { color: '#94a3b8', icon: '●', short: dept.substring(0, 2).toUpperCase() } : null;
+              const statusText = agentStatusTexts[agent.id] || phaseData.status_text || agent.status_text || null;
+
               return (
                 <div key={agent.id} style={{
-                  display: 'flex', alignItems: 'center', gap: 8,
-                  padding: '6px 10px', borderRadius: 4,
-                  background: 'var(--ink-2)', border: `1px solid ${typeColor}20`,
-                  borderLeft: `2px solid ${typeColor}`,
-                  minWidth: 160,
+                  padding: '12px 14px', borderRadius: 8,
+                  background: isWorking ? `${phaseColor}08` : 'var(--ink-2)',
+                  border: `1px solid ${isWorking ? `${phaseColor}40` : s === 'offline' ? 'var(--ink-3)' : `${typeColor}25`}`,
+                  borderLeft: `4px solid ${isWorking ? phaseColor : s === 'offline' ? 'var(--ink-4)' : typeColor}`,
+                  transition: 'all 300ms ease',
+                  boxShadow: isWorking ? `0 0 20px ${phaseColor}20, inset 0 0 30px ${phaseColor}05` : 'none',
+                  opacity: s === 'offline' ? 0.5 : 1,
                 }}>
-                  <span className={dotClass} />
-                  <div style={{ flex: 1, minWidth: 0 }}>
-                    <div style={{ fontFamily: 'var(--font-mono)', fontSize: 10, fontWeight: 700, color: 'var(--text-hi)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                      {agent.name}
-                    </div>
-                    <div style={{ fontFamily: 'var(--font-mono)', fontSize: 8, color: 'var(--text-lo)', marginTop: 1 }}>
-                      {s.toUpperCase()} · last seen {lastSeen}
+                  {/* Agent header */}
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6 }}>
+                    <span className={dotClass} />
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+                        <span style={{ fontFamily: 'var(--font-mono)', fontSize: 13, fontWeight: 700, color: 'var(--text-hi)' }}>
+                          {agent.name}
+                        </span>
+                        <span style={{
+                          fontFamily: 'var(--font-mono)', fontSize: 8, padding: '1px 6px',
+                          borderRadius: 2, background: `${typeColor}15`, border: `1px solid ${typeColor}25`,
+                          color: typeColor, letterSpacing: '0.08em', textTransform: 'uppercase',
+                        }}>{agent.agent_type}</span>
+                        {deptMeta && (
+                          <span style={{
+                            fontFamily: 'var(--font-mono)', fontSize: 8, padding: '1px 6px',
+                            borderRadius: 2, background: `${deptMeta.color}15`, border: `1px solid ${deptMeta.color}25`,
+                            color: deptMeta.color, letterSpacing: '0.08em', textTransform: 'uppercase',
+                          }}>{deptMeta.icon} {deptMeta.short}</span>
+                        )}
+                      </div>
+                      <div style={{ fontFamily: 'var(--font-mono)', fontSize: 8, color: 'var(--text-lo)', marginTop: 2 }}>
+                        {agent.handle} · {s.toUpperCase()} · heartbeat {lastSeen}
+                      </div>
                     </div>
                   </div>
-                  <span style={{
-                    fontFamily: 'var(--font-mono)', fontSize: 7, padding: '1px 5px',
-                    borderRadius: 2, background: `${typeColor}10`, border: `1px solid ${typeColor}20`,
-                    color: typeColor, letterSpacing: '0.08em', textTransform: 'uppercase', flexShrink: 0,
-                  }}>{agent.agent_type}</span>
+
+                  {/* Purpose line */}
+                  {agent.purpose && (
+                    <div style={{
+                      fontFamily: 'var(--font-mono)', fontSize: 9, color: 'var(--text-mid)',
+                      marginBottom: 6, paddingLeft: 2, fontStyle: 'italic',
+                      overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+                    }}>
+                      {agent.purpose}
+                    </div>
+                  )}
+
+                  {/* ▼ PHASE STATUS BOX ▼ */}
+                  <div style={{
+                    padding: '8px 10px', borderRadius: 4,
+                    background: isWorking ? `${phaseColor}10` : 'var(--ink-1)',
+                    border: `1px solid ${isWorking ? `${phaseColor}30` : 'var(--ink-3)'}`,
+                    minHeight: 36,
+                  }}>
+                    {isWorking ? (
+                      <>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 4 }}>
+                          <div style={{
+                            display: 'flex', alignItems: 'center', gap: 5,
+                            padding: '2px 8px', borderRadius: 3,
+                            background: `${phaseColor}20`, border: `1px solid ${phaseColor}40`,
+                          }}>
+                            <span style={{
+                              display: 'inline-block', width: 6, height: 6, borderRadius: '50%',
+                              background: phaseColor, boxShadow: `0 0 8px ${phaseColor}`,
+                              animation: 'hq-recruit-pulse 0.7s ease-in-out infinite alternate',
+                            }} />
+                            <span style={{
+                              fontFamily: 'var(--font-mono)', fontSize: 10, fontWeight: 700,
+                              color: phaseColor, letterSpacing: '0.1em', textTransform: 'uppercase',
+                            }}>
+                              {phase}
+                            </span>
+                          </div>
+                          {phaseElapsed && (
+                            <span style={{ fontFamily: 'var(--font-mono)', fontSize: 8, color: 'var(--text-lo)', marginLeft: 'auto' }}>
+                              {phaseElapsed} ago
+                            </span>
+                          )}
+                        </div>
+                        {phaseData.task_title && (
+                          <div style={{
+                            fontFamily: 'var(--font-mono)', fontSize: 10, color: 'var(--text-hi)',
+                            fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+                          }}>
+                            {phaseData.task_title}
+                          </div>
+                        )}
+                      </>
+                    ) : (
+                      <div style={{
+                        fontFamily: 'var(--font-mono)', fontSize: 10,
+                        color: s === 'offline' ? 'var(--text-dim)' : 'var(--text-lo)',
+                        display: 'flex', alignItems: 'center', gap: 6,
+                      }}>
+                        <span style={{
+                          display: 'inline-block', width: 6, height: 6, borderRadius: '50%',
+                          background: s === 'offline' ? 'var(--ink-5)' : '#10b98140',
+                          border: `1px solid ${s === 'offline' ? 'var(--ink-5)' : '#10b98160'}`,
+                        }} />
+                        {s === 'offline' ? 'OFFLINE' : 'IDLE — waiting for tasks'}
+                      </div>
+                    )}
+                  </div>
+
+                  {/* ▼ LIVE STATUS TEXT BOX — natural language updates ▼ */}
+                  <div style={{
+                    marginTop: 8, padding: '8px 10px', borderRadius: 4,
+                    background: statusText ? 'rgba(34,211,238,0.06)' : 'var(--ink-1)',
+                    border: `1px solid ${statusText ? 'rgba(34,211,238,0.2)' : 'var(--ink-3)'}`,
+                    minHeight: 32,
+                    transition: 'all 300ms ease',
+                  }}>
+                    <div style={{
+                      fontFamily: 'var(--font-mono)', fontSize: 9, color: 'rgba(34,211,238,0.6)',
+                      letterSpacing: '0.1em', textTransform: 'uppercase', marginBottom: 3,
+                    }}>
+                      LIVE STATUS
+                    </div>
+                    <div style={{
+                      fontFamily: 'var(--font-mono)', fontSize: 11,
+                      color: statusText ? 'var(--text-hi)' : 'var(--text-dim)',
+                      lineHeight: 1.4,
+                      wordBreak: 'break-word',
+                    }}>
+                      {statusText ? (
+                        <>
+                          <span style={{
+                            display: 'inline-block', width: 5, height: 5, borderRadius: '50%',
+                            background: 'var(--cyan)', marginRight: 6, verticalAlign: 'middle',
+                            boxShadow: '0 0 6px var(--cyan)',
+                            animation: isWorking ? 'hq-recruit-pulse 1s ease-in-out infinite alternate' : 'none',
+                          }} />
+                          {statusText}
+                        </>
+                      ) : (
+                        <span style={{ opacity: 0.4 }}>No status update yet</span>
+                      )}
+                    </div>
+                  </div>
+
+                  {/* Soul indicator */}
+                  {agent.soul_path && (
+                    <div style={{
+                      marginTop: 6, fontFamily: 'var(--font-mono)', fontSize: 8,
+                      color: 'var(--text-dim)', display: 'flex', alignItems: 'center', gap: 4,
+                    }}>
+                      <span style={{ color: 'rgba(168,85,247,0.6)' }}>&#9830;</span> soul.md loaded
+                    </div>
+                  )}
                 </div>
               );
             })}
             {agents.length === 0 && (
-              <span style={{ fontFamily: 'var(--font-mono)', fontSize: 10, color: 'var(--text-lo)' }}>No agents registered</span>
+              <div style={{ fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--text-lo)', padding: 20, textAlign: 'center' }}>No agents registered</div>
             )}
           </div>
         </div>
@@ -1057,6 +1278,85 @@ export default function HQ() {
               })}
             </div>
           )}
+        </div>
+
+        {/* ── LIVE AGENT LOGS ─────────────────────────────────────────── */}
+        <div className="neon-card" style={{ padding: '16px 20px', borderColor: 'rgba(168,85,247,0.2)' }}>
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 12 }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+              <Bot size={14} style={{ color: '#a855f7' }} />
+              <div style={{ fontFamily: 'var(--font-mono)', fontSize: 11, color: '#a855f7', letterSpacing: '0.12em', fontWeight: 700 }}>
+                LIVE AGENT LOGS
+              </div>
+              <span className="ops-dot ops-dot-green ops-dot-pulse" />
+              <span style={{ fontFamily: 'var(--font-mono)', fontSize: 9, color: 'var(--text-lo)' }}>
+                {liveLogs.length} entries
+              </span>
+            </div>
+            <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+              <select
+                value={logFilter}
+                onChange={e => setLogFilter(e.target.value)}
+                style={{
+                  fontFamily: 'var(--font-mono)', fontSize: 9, padding: '3px 8px',
+                  background: 'var(--ink-3)', border: '1px solid var(--ink-5)',
+                  borderRadius: 3, color: 'var(--text-mid)', cursor: 'pointer',
+                }}
+              >
+                <option value="all">All agents</option>
+                {agents.map(a => <option key={a.id} value={a.id}>{a.name}</option>)}
+              </select>
+              <button onClick={() => setLiveLogs([])} className="ops-btn" style={{ fontSize: 8, padding: '3px 8px' }}>
+                clear
+              </button>
+            </div>
+          </div>
+
+          <div style={{
+            maxHeight: 260, overflowY: 'auto', background: '#0a0a0f',
+            border: '1px solid var(--ink-4)', borderRadius: 4, padding: '8px 10px',
+            fontFamily: 'var(--font-mono)',
+          }}>
+            {(logFilter === 'all' ? liveLogs : liveLogs.filter(l => l.agent_id === logFilter)).length === 0 ? (
+              <div style={{ fontSize: 10, color: 'var(--text-dim)', padding: '24px 0', textAlign: 'center' }}>
+                Waiting for agent logs... activity will stream here in real-time.
+              </div>
+            ) : (
+              (logFilter === 'all' ? liveLogs : liveLogs.filter(l => l.agent_id === logFilter)).map((entry, i) => {
+                const levelColors: Record<string, string> = {
+                  info: '#64748b', warn: '#f59e0b', error: '#ef4444',
+                  phase: '#a855f7', task: '#10b981',
+                };
+                const color = levelColors[entry.level] || '#64748b';
+                const time = entry.created_at ? new Date(entry.created_at).toLocaleTimeString() : '';
+                return (
+                  <div key={`${entry.created_at}-${i}`} style={{
+                    display: 'flex', gap: 8, padding: '4px 8px', borderRadius: 3,
+                    borderLeft: `3px solid ${color}`,
+                    marginBottom: 3, background: i % 2 === 0 ? 'transparent' : 'rgba(255,255,255,0.02)',
+                    animation: 'animate-fade-up 150ms ease-out',
+                  }}>
+                    <span style={{ fontSize: 8, color: '#475569', flexShrink: 0, minWidth: 58 }}>
+                      {time}
+                    </span>
+                    <span style={{
+                      fontSize: 8, fontWeight: 700,
+                      color, flexShrink: 0, minWidth: 36, textTransform: 'uppercase',
+                    }}>
+                      {entry.level}
+                    </span>
+                    <span style={{ fontSize: 9, color: 'var(--cyan)', flexShrink: 0, minWidth: 100, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontWeight: 600 }}>
+                      {entry.agent_name}
+                    </span>
+                    <span style={{ fontSize: 9, color: '#cbd5e1', flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                      {entry.message}
+                    </span>
+                  </div>
+                );
+              })
+            )}
+            <div ref={logsEndRef} />
+          </div>
         </div>
 
         {/* Quick nav */}
